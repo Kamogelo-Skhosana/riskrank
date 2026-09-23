@@ -7,7 +7,7 @@
 
 ## Summary
 
-| Priority | Issues | Occurrences |
+| Priority | Issues | Endpoints |
 |---|---:|---:|
 | Critical | 1 | 2 |
 | High | 1 | 17 |
@@ -109,7 +109,7 @@ incident-support.kdbx
 
 These findings have no AI assessment yet, so they are listed by the scanner's own severity.
 
-| Issue | Scanner severity | Occurrences |
+| Issue | Scanner severity | Endpoints |
 |---|---|---:|
 | User Agent Fuzzer | Informational | 23 |
 

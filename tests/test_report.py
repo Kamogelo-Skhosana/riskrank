@@ -5,6 +5,7 @@ Tickets: R016, R017, R029-R033
 
 import io
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,9 +18,12 @@ from riskrank.report.console import print_findings, severity_summary
 from riskrank.report.json_export import build_export, export_json
 from riskrank.report.markdown import (
     TEMPLATE_NAME,
+    build_report_context,
     code_block,
     create_environment,
     cwe_link,
+    generate_markdown_report,
+    group_into_issues,
     inline_code,
     md,
 )
@@ -302,3 +306,194 @@ def test_hostile_values_cannot_break_the_report():
     assert "Evil \\| type ## Injected heading" in output
     assert "``/x`y``" in output
     assert "````text\n```\n## escaped fence\n````" in output
+
+
+# --- R030: Markdown report generator -----------------------------------------------------
+
+REPORT_TIME = datetime(2026, 9, 24, 10, 15, tzinfo=UTC)
+
+
+def triaged(fid, type_, endpoint, exploit, impact, severity="Medium", **extra):
+    extra.setdefault("ai_explanation", f"Why {type_} matters.")
+    extra.setdefault("suggested_fix", f"How to fix {type_}.")
+    return Finding(
+        id=fid,
+        type=type_,
+        severity_raw=severity,
+        endpoint=endpoint,
+        exploitability_score=exploit,
+        business_impact_score=impact,
+        **extra,
+    )
+
+
+def untriaged(fid, type_, endpoint, severity="Informational"):
+    return Finding(id=fid, type=type_, severity_raw=severity, endpoint=endpoint)
+
+
+def report(findings, **kwargs):
+    kwargs.setdefault("scanned_at", REPORT_TIME)
+    return generate_markdown_report("http://localhost:3000", findings, **kwargs)
+
+
+def test_generate_report_end_to_end():
+    findings = [
+        triaged("f1", "CSP Header Not Set", "/", 4, 5),
+        triaged(
+            "f2",
+            "SQL Injection",
+            "/rest/user/login",
+            9,
+            9,
+            "High",
+            cwe_id=89,
+            evidence="' OR 1=1--",
+        ),
+        triaged("f3", "CSP Header Not Set", "/main.js", 4, 5),
+        untriaged("f4", "User Agent Fuzzer", "/assets"),
+    ]
+    output = report(findings)
+
+    assert output.startswith("# riskrank report: http://localhost:3000\n")
+    assert "**Scanned:** 2026-09-24 10:15 UTC · **Findings:** 4 raw, 3 distinct issues" in output
+    assert "**Fix first:** SQL Injection (Critical, score 81/100)." in output
+    assert "### 1. [Critical] SQL Injection" in output
+    assert "### 2. [Medium] CSP Header Not Set" in output
+    assert "- **Found on 2 endpoints:**\n  - `/`\n  - `/main.js`" in output
+    assert "| User Agent Fuzzer | Informational | 1 |" in output
+    assert "```text\n' OR 1=1--\n```" in output
+
+
+def test_summary_counts_issues_and_occurrences_per_tier():
+    context = build_report_context(
+        "t",
+        [
+            triaged("a", "A", "/1", 9, 9),
+            triaged("b", "A", "/2", 9, 9),
+            triaged("c", "B", "/1", 6, 6),
+            triaged("d", "C", "/1", 1, 1),
+            untriaged("e", "D", "/1"),
+        ],
+        scanned_at=REPORT_TIME,
+    )
+    assert context.summary == [
+        {"tier": "Critical", "issues": 1, "occurrences": 2},
+        {"tier": "High", "issues": 1, "occurrences": 1},
+        {"tier": "Medium", "issues": 0, "occurrences": 0},
+        {"tier": "Low", "issues": 1, "occurrences": 1},
+        {"tier": "Not triaged", "issues": 1, "occurrences": 1},
+    ]
+    assert [i.type for i in context.fix_first] == ["A", "B"]
+    assert [i.type for i in context.other] == ["C"]
+    assert [i.type for i in context.untriaged] == ["D"]
+    assert [i.rank for i in context.fix_first + context.other + context.untriaged] == [1, 2, 3, 4]
+
+
+def test_no_not_triaged_row_when_everything_is_triaged():
+    context = build_report_context("t", [triaged("a", "A", "/", 5, 5)], REPORT_TIME)
+    assert [row["tier"] for row in context.summary] == ["Critical", "High", "Medium", "Low"]
+    assert context.untriaged == []
+
+
+def test_group_takes_advice_from_the_highest_scoring_occurrence():
+    findings = [
+        triaged("low", "XSS", "/search", 2, 2, ai_explanation="minor here"),
+        triaged("high", "XSS", "/admin", 8, 8, ai_explanation="serious here"),
+    ]
+    [issue] = group_into_issues(findings)
+    assert issue.tier == "Critical"
+    assert issue.score == 64
+    assert issue.explanation == "serious here"
+    assert issue.all_endpoints == ["/admin", "/search"]  # most important first
+
+
+def test_group_fills_missing_evidence_and_cwe_from_other_occurrences():
+    findings = [
+        triaged("top", "XSS", "/a", 9, 9),
+        triaged("other", "XSS", "/b", 1, 1, evidence="<script>", cwe_id=79),
+    ]
+    [issue] = group_into_issues(findings)
+    assert issue.evidence == "<script>"
+    assert issue.cwe_id == 79
+
+
+def test_group_deduplicates_endpoints():
+    findings = [triaged(str(i), "Timestamp", "/styles.css", 1, 1) for i in range(12)]
+    [issue] = group_into_issues(findings)
+    assert issue.all_endpoints == ["/styles.css"]
+    assert issue.occurrences == 1
+
+
+def test_endpoint_list_is_capped():
+    findings = [triaged(str(i), "CSP", f"/page{i}", 4, 5) for i in range(8)]
+    output = report(findings, max_endpoints=3)
+    assert "- **Found on 8 endpoints:**" in output
+    assert "  - `/page2`\n  - …and 5 more" in output
+    assert "`/page3`" not in output
+
+
+def test_type_with_some_untriaged_occurrences_is_still_triaged():
+    findings = [untriaged("u", "XSS", "/b", "High"), triaged("t", "XSS", "/a", 7, 7)]
+    [issue] = group_into_issues(findings)
+    assert issue.tier == "High"  # 7x7 = 49
+    assert issue.all_endpoints == ["/a", "/b"]
+
+
+def test_findings_need_not_be_pre_sorted_or_have_consistent_tiers():
+    stale = triaged("a", "A", "/", 1, 1).model_copy(update={"priority_tier": "Critical"})
+    output = report([stale, triaged("b", "B", "/", 9, 9)])
+    assert output.index("[Critical] B") < output.index("[Low] A")
+
+
+def test_report_with_no_findings():
+    output = report([])
+    assert "**Findings:** 0 raw, 0 distinct issues" in output
+    assert "No triaged issues." in output
+    assert "## Fix first" not in output
+
+
+def test_report_with_only_untriaged_findings():
+    output = report([untriaged("a", "A", "/"), untriaged("b", "B", "/", "High")])
+    assert "No triaged issues." in output
+    # Untriaged issues are ordered by scanner severity.
+    assert output.index("| B | High | 1 |") < output.index("| A | Informational | 1 |")
+
+
+def test_single_issue_uses_singular_wording():
+    output = report([triaged("a", "A", "/", 5, 5)])
+    assert "1 distinct issue ·" in output
+    assert "- **Found on 1 endpoint:**" in output
+
+
+def test_scanned_at_is_shown_in_utc():
+    from datetime import timedelta, timezone
+
+    sast = timezone(timedelta(hours=2))
+    output = report([], scanned_at=datetime(2026, 9, 24, 12, 15, tzinfo=sast))
+    assert "2026-09-24 10:15 UTC" in output
+
+
+def test_naive_scanned_at_is_treated_as_utc():
+    naive = datetime(2026, 9, 24, 10, 15)  # noqa: DTZ001 - naive on purpose
+    assert "2026-09-24 10:15 UTC" in report([], scanned_at=naive)
+
+
+def test_scanned_at_defaults_to_now():
+    output = generate_markdown_report("t", [])
+    assert datetime.now(UTC).strftime("%Y-%m-%d") in output
+
+
+def test_hostile_finding_text_is_escaped_in_generated_report():
+    finding = triaged(
+        "x",
+        "Evil <img src=x onerror=alert(1)>",
+        "/a`b",
+        9,
+        9,
+        ai_explanation="See [this](http://phish.example) now",
+    )
+    output = report([finding])
+    assert re.search(r"(?<!\\)<img", output) is None  # no unescaped HTML tag
+    assert "\\<img src=x onerror=alert(1)\\>" in output
+    assert "\\[this\\](http://phish.example)" in output
+    assert "``/a`b``" in output

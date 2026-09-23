@@ -9,6 +9,7 @@
     report.total_findings    int   raw scanner findings
     report.issue_count       int   distinct issues after grouping by type
     report.summary           list of {tier, issues, occurrences}, Critical -> Low, then "Not triaged"
+                             (occurrences = distinct endpoints affected)
     report.fix_first         list[Issue]  Critical + High, highest score first
     report.other             list[Issue]  Medium + Low
     report.untriaged         list[Issue]  no AI scores (triage skipped or failed)
@@ -28,7 +29,7 @@
 
 ## Summary
 
-| Priority | Issues | Occurrences |
+| Priority | Issues | Endpoints |
 |---|---:|---:|
 {% for row in report.summary %}
 | {{ row.tier }} | {{ row.issues }} | {{ row.occurrences }} |
@@ -89,7 +90,7 @@ No triaged issues.
 
 These findings have no AI assessment yet, so they are listed by the scanner's own severity.
 
-| Issue | Scanner severity | Occurrences |
+| Issue | Scanner severity | Endpoints |
 |---|---|---:|
 {% for issue in report.untriaged %}
 | {{ issue.type | md }} | {{ issue.severity_raw }} | {{ issue.occurrences }} |
