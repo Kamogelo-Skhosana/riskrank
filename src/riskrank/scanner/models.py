@@ -5,7 +5,6 @@ Ticket: R012
 """
 
 from pydantic import BaseModel
-from typing import Optional
 
 
 class Finding(BaseModel):
@@ -13,13 +12,13 @@ class Finding(BaseModel):
     type: str
     severity_raw: str
     endpoint: str
-    evidence: Optional[str] = None
-    description: Optional[str] = None
-    cwe_id: Optional[int] = None
+    evidence: str | None = None
+    description: str | None = None
+    cwe_id: int | None = None
 
     # Populated later by the triage layer (Phase 2) — see R024
-    exploitability_score: Optional[int] = None
-    business_impact_score: Optional[int] = None
-    priority_tier: Optional[str] = None
-    ai_explanation: Optional[str] = None
-    suggested_fix: Optional[str] = None
+    exploitability_score: int | None = None
+    business_impact_score: int | None = None
+    priority_tier: str | None = None
+    ai_explanation: str | None = None
+    suggested_fix: str | None = None

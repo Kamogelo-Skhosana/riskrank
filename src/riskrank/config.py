@@ -7,9 +7,10 @@ report layers.
 Ticket: R011
 """
 
-from dataclasses import dataclass
-from dotenv import load_dotenv
 import os
+from dataclasses import dataclass
+
+from dotenv import load_dotenv
 
 
 @dataclass

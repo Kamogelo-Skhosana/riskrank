@@ -4,7 +4,7 @@ Tickets: R032, R033
 """
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, Session
+from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
