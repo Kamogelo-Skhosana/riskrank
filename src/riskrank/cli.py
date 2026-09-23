@@ -3,7 +3,7 @@
 Usage:
     riskrank scan <url>
 
-Tickets: R015, R016, R017, R019, R031, R033
+Tickets: R015, R016, R017, R019, R031, R033, R034
 """
 
 from collections.abc import Callable
@@ -16,7 +16,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 from sqlalchemy.exc import SQLAlchemyError
 
-from riskrank.config import ConfigError, load_settings
+from riskrank.config import ConfigError, Settings, load_settings
 from riskrank.report.console import print_findings
 from riskrank.report.json_export import export_json
 from riskrank.report.markdown import generate_markdown_report, write_report
@@ -25,6 +25,8 @@ from riskrank.scanner.models import Finding
 from riskrank.scanner.normalizer import normalize_alerts
 from riskrank.scanner.zap_client import ZapClient, ZapError
 from riskrank.triage.context import ContextConfig, ContextConfigError, load_context_config
+from riskrank.triage.llm_client import LLMClient
+from riskrank.triage.triage import triage_findings
 
 app = typer.Typer(help="riskrank — AI-powered vulnerability scanner and prioritizer.")
 console = Console()
@@ -80,6 +82,62 @@ def _load_target_context(path: Path | None) -> ContextConfig | None:
     return config
 
 
+def _llm_for_scan(triage: bool | None, settings: Settings) -> LLMClient | None:
+    """Decide whether this scan runs AI triage.
+
+    --triage requires LLM_API_KEY (config error if missing); --no-triage
+    skips it; by default triage runs whenever LLM_API_KEY is set.
+    """
+    if triage is False:
+        return None
+    try:
+        return LLMClient.from_settings(settings)
+    except ConfigError as exc:
+        if triage is True:
+            err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")
+            raise typer.Exit(EXIT_CONFIG_ERROR) from exc
+        console.print(
+            "[dim]AI triage skipped: set LLM_API_KEY in .env to rank findings "
+            "by real-world risk.[/dim]"
+        )
+        return None
+
+
+def run_triage(
+    findings: list[Finding], llm: LLMClient, context_config: ContextConfig | None
+) -> list[Finding]:
+    """AI-triage findings with a progress bar; never fails the scan."""
+    if not findings:
+        return findings
+    with Progress(
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task("AI triage", total=None)
+
+        def on_progress(done: int, total: int) -> None:
+            progress.update(task, completed=done, total=total)
+
+        summary = triage_findings(findings, llm, context_config, on_progress=on_progress)
+
+    console.print(
+        f"Triaged {summary.triaged} of {len(findings)} finding(s) "
+        f"using {summary.llm_calls} AI call(s) ({summary.groups} distinct issue group(s))",
+        soft_wrap=True,
+    )
+    if summary.failed:
+        err_console.print(
+            f"[yellow]Warning: {summary.failed} finding(s) could not be triaged and are "
+            "listed as not triaged.[/yellow]"
+        )
+        for error in summary.errors[:5]:
+            err_console.print(f"  [yellow]-[/yellow] {escape(error)}", soft_wrap=True)
+    return summary.findings
+
+
 @app.command()
 def scan(
     url: Annotated[
@@ -96,6 +154,17 @@ def scan(
         Path | None,
         typer.Option(
             "--report", "-r", help="Also write a prioritized Markdown report to this file."
+        ),
+    ] = None,
+    triage: Annotated[
+        bool | None,
+        typer.Option(
+            "--triage/--no-triage",
+            help=(
+                "Rank findings with AI triage. Default: on when LLM_API_KEY is set; "
+                "--triage makes it required, --no-triage skips it."
+            ),
+            show_default=False,
         ),
     ] = None,
     save: Annotated[
@@ -117,8 +186,7 @@ def scan(
         ),
     ] = None,
 ):
-    """Run a full scan against URL and print/save the results."""
-    # TODO (R018-R034): wire up triage -> ranking -> report generation (Phase 2)
+    """Scan URL with ZAP, AI-triage the findings, and print/save the results."""
     console.print(f"[bold]riskrank[/bold] scanning {escape(url)}")
 
     try:
@@ -128,15 +196,19 @@ def scan(
         err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_CONFIG_ERROR) from exc
 
-    # Validate the context file before the (long) scan, so a typo fails fast.
-    # R023 will keep the returned config and pass it to the triage step.
-    _load_target_context(context)
+    # Check the context file and LLM settings before the (long) scan, so a
+    # typo or missing key fails fast.
+    context_config = _load_target_context(context)
+    llm = _llm_for_scan(triage, settings)
 
     try:
         findings = run_scan(client, url)
     except ZapError as exc:
         err_console.print(f"[red]Scan failed:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_SCAN_FAILED) from exc
+
+    if llm is not None:
+        findings = run_triage(findings, llm, context_config)
 
     print_findings(findings, console=console)
 

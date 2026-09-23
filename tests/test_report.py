@@ -90,6 +90,28 @@ def test_empty_findings_prints_no_findings():
     assert "No findings." in render([])
 
 
+def test_triaged_findings_show_tier_and_score_in_ai_order():
+    findings = [
+        _finding(1, "High", exploitability_score=2, business_impact_score=2),
+        _finding(2, "Low", exploitability_score=9, business_impact_score=9),
+        _finding(3, "Medium"),  # not triaged
+    ]
+    output = render(findings)
+    assert "Findings, AI-ranked (3)" in output
+    assert "Tier" in output and "Score" in output
+    # AI ranking, not scanner severity: the scanner-"Low" finding comes first.
+    order = [output.index(f"finding-{n:03d}") for n in (2, 1, 3)]
+    assert order == sorted(order)
+    row = next(line for line in output.splitlines() if "finding-002" in line)
+    assert "Critical" in row and "81" in row
+
+
+def test_untriaged_table_has_no_tier_column():
+    output = render([_finding(1, "High")])
+    assert "Raw findings (1)" in output
+    assert "Tier" not in output
+
+
 def test_severity_summary_counts_every_level():
     findings = [_finding(1, "High"), _finding(2, "High"), _finding(3, "Low")]
     assert severity_summary(findings) == "High: 2 · Medium: 0 · Low: 1 · Informational: 0"

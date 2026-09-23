@@ -1,18 +1,20 @@
 """Core triage logic — scores each Finding via the LLM and assigns
 a priority tier.
 
-Tickets: R023, R024, R025, R026, R027
+Tickets: R023, R024, R025, R026, R027, R034
 """
 
 import json
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from riskrank.scanner.models import Finding, severity_rank
-from riskrank.triage.context import TargetContext
-from riskrank.triage.llm_client import LLMClient
+from riskrank.triage.context import ContextConfig, TargetContext, resolve_context
+from riskrank.triage.llm_client import LLMClient, LLMError
 from riskrank.triage.prompts import TRIAGE_PROMPT_TEMPLATE, TRIAGE_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -237,3 +239,113 @@ def rank_findings(findings: list[Finding]) -> list[Finding]:
     were edited after triage.
     """
     return sorted((assign_priority_tier(f) for f in findings), key=_ranking_key)
+
+
+# --- R034: triaging a whole scan ---------------------------------------------------------
+
+# Stop calling the LLM after this many failures in a row: it's almost always
+# a problem every call will hit (bad key, no credit, API down), so carrying
+# on would just burn time. Findings not yet triaged stay untriaged.
+MAX_CONSECUTIVE_FAILURES = 3
+
+TriageProgress = Callable[[int, int], None]  # (groups done, total groups)
+
+
+@dataclass
+class TriageSummary:
+    """Result of triage_findings()."""
+
+    findings: list[Finding]
+    llm_calls: int = 0
+    groups: int = 0
+    triaged: int = 0
+    failed: int = 0
+    stopped_early: bool = False
+    errors: list[str] = field(default_factory=list)
+
+
+def _group_key(finding: Finding, context: TargetContext) -> tuple:
+    """Findings sharing this key get the same assessment from one LLM call:
+    same issue (type, scanner severity, CWE) in the same kind of place
+    (same public/sensitive/auth context)."""
+    return (
+        finding.type,
+        finding.severity_raw,
+        finding.cwe_id,
+        context.public_facing,
+        context.handles_sensitive_data,
+        context.requires_auth,
+    )
+
+
+def triage_findings(
+    findings: list[Finding],
+    llm: LLMClient,
+    context_config: ContextConfig | None = None,
+    on_progress: TriageProgress | None = None,
+) -> TriageSummary:
+    """Triage every finding in a scan, using as few LLM calls as possible.
+
+    Scanners report the same issue once per page (a Juice Shop scan gave 283
+    findings but only 5 issue types), so findings are grouped by issue and
+    context (_group_key) and each group is sent to the LLM once, using its
+    first finding as the example. The assessment is then applied to every
+    finding in the group.
+
+    Failures never abort the scan: a group that can't be triaged is left
+    untriaged (reported in errors), and after MAX_CONSECUTIVE_FAILURES in a
+    row the remaining groups are skipped.
+
+    Returns findings in their original order; use rank_findings() to sort.
+    """
+    groups: dict[tuple, list[int]] = {}
+    contexts: dict[tuple, TargetContext] = {}
+    for index, finding in enumerate(findings):
+        context = resolve_context(finding.endpoint, context_config)
+        key = _group_key(finding, context)
+        groups.setdefault(key, []).append(index)
+        contexts.setdefault(key, context)
+
+    result = list(findings)
+    summary = TriageSummary(findings=result, groups=len(groups))
+    consecutive_failures = 0
+
+    for done, (key, indexes) in enumerate(groups.items(), start=1):
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            summary.stopped_early = True
+            summary.failed += len(indexes)
+            if on_progress:
+                on_progress(done, len(groups))
+            continue
+
+        representative = findings[indexes[0]]
+        summary.llm_calls += 1
+        try:
+            assessed = triage_finding(representative, contexts[key], llm)
+        except (TriageError, LLMError) as exc:
+            consecutive_failures += 1
+            summary.failed += len(indexes)
+            summary.errors.append(f"{representative.type}: {exc}")
+            logger.warning("Triage failed for %s: %s", representative.type, exc)
+        else:
+            consecutive_failures = 0
+            update = {
+                "exploitability_score": assessed.exploitability_score,
+                "business_impact_score": assessed.business_impact_score,
+                "priority_tier": assessed.priority_tier,
+                "ai_explanation": assessed.ai_explanation,
+                "suggested_fix": assessed.suggested_fix,
+            }
+            for index in indexes:
+                result[index] = findings[index].model_copy(update=update)
+            summary.triaged += len(indexes)
+
+        if on_progress:
+            on_progress(done, len(groups))
+
+    if summary.stopped_early:
+        summary.errors.append(
+            f"Stopped after {MAX_CONSECUTIVE_FAILURES} failures in a row; "
+            "remaining findings were left untriaged."
+        )
+    return summary

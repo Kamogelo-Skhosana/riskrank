@@ -1,6 +1,9 @@
-"""Console output formatter for raw findings (Phase 1).
+"""Console output formatter for findings.
 
-Ticket: R016
+Untriaged findings are listed by scanner severity (Phase 1). Once AI triage
+has run, the table adds Tier and Score columns and follows the AI ranking.
+
+Tickets: R016, R034
 """
 
 from collections import Counter
@@ -10,7 +13,14 @@ from rich.table import Table
 from rich.text import Text
 
 from riskrank.scanner.models import SEVERITY_ORDER, Finding, severity_rank
+from riskrank.triage.triage import rank_findings
 
+TIER_STYLES = {
+    "Critical": "bold white on red",
+    "High": "bold red",
+    "Medium": "yellow",
+    "Low": "cyan",
+}
 SEVERITY_STYLES = {
     "High": "bold red",
     "Medium": "yellow",
@@ -32,15 +42,16 @@ def severity_summary(findings: list[Finding]) -> str:
 
 
 def print_findings(findings: list[Finding], console: Console | None = None) -> None:
-    """Print a readable table of raw findings, most severe first.
+    """Print a readable table of findings, most important first.
 
-    Findings are ordered by the scanner's own severity label (the AI
-    ranking comes in Phase 2); ties keep ZAP's original order. All
-    finding text is rendered literally, so scanner output containing
-    square brackets (e.g. /api/[id]) can't be misread as rich markup.
+    If any finding has been triaged, the table shows Tier and Score columns
+    and follows the AI ranking (rank_findings); otherwise findings are
+    ordered by the scanner's own severity, ties keeping ZAP's order. All
+    finding text is rendered literally, so scanner output containing square
+    brackets (e.g. /api/[id]) can't be misread as rich markup.
 
     Args:
-        findings: normalized findings to display.
+        findings: normalized (and possibly triaged) findings to display.
         console: rich Console to print to (defaults to stdout); injectable
             for tests.
     """
@@ -50,21 +61,33 @@ def print_findings(findings: list[Finding], console: Console | None = None) -> N
         console.print("[green]No findings.[/green]")
         return
 
-    table = Table(title=f"Raw findings ({len(findings)})", title_justify="left")
+    triaged = any(f.priority_score is not None for f in findings)
+    title = "Findings, AI-ranked" if triaged else "Raw findings"
+    table = Table(title=f"{title} ({len(findings)})", title_justify="left")
     table.add_column("ID", no_wrap=True)
+    if triaged:
+        table.add_column("Tier", no_wrap=True)
+        table.add_column("Score", justify="right", no_wrap=True)
     table.add_column("Severity", no_wrap=True)
     table.add_column("Type")
     table.add_column("Endpoint", overflow="fold")
     table.add_column("CWE", justify="right", no_wrap=True)
 
-    for finding in sorted(findings, key=_severity_rank):
-        table.add_row(
-            Text(finding.id),
+    ordered = rank_findings(findings) if triaged else sorted(findings, key=_severity_rank)
+    for finding in ordered:
+        row = [Text(finding.id)]
+        if triaged:
+            tier = finding.priority_tier or "-"
+            row.append(Text(tier, style=TIER_STYLES.get(tier, "dim")))
+            score = finding.priority_score
+            row.append(Text(str(score) if score is not None else "-"))
+        row += [
             Text(finding.severity_raw, style=SEVERITY_STYLES.get(finding.severity_raw, "")),
             Text(finding.type),
             Text(finding.endpoint),
             Text(str(finding.cwe_id) if finding.cwe_id is not None else "-"),
-        )
+        ]
+        table.add_row(*row)
 
     console.print(table)
     console.print(Text(severity_summary(findings)))

@@ -14,10 +14,11 @@ import pytest
 
 from riskrank.scanner.models import Finding
 from riskrank.scanner.normalizer import normalize_alerts
-from riskrank.triage.context import TargetContext, resolve_context
+from riskrank.triage.context import ContextConfig, TargetContext, resolve_context
 from riskrank.triage.llm_client import LLMClient, LLMError
 from riskrank.triage.prompts import TRIAGE_SYSTEM_PROMPT
 from riskrank.triage.triage import (
+    MAX_CONSECUTIVE_FAILURES,
     MAX_FIELD_CHARS,
     TriageError,
     assign_priority_tier,
@@ -26,6 +27,7 @@ from riskrank.triage.triage import (
     rank_findings,
     tier_for_score,
     triage_finding,
+    triage_findings,
 )
 
 VALID_REPLY = {
@@ -640,3 +642,139 @@ class TestGeneralProperties:
             for f in ranked:
                 expected = tier_for_score(f.priority_score) if f.priority_score else None
                 assert f.priority_tier == expected
+
+
+# --- R034: triaging a whole scan ----------------------------------------------------------
+
+
+class CountingLLM:
+    """Scores by finding type; can be told to fail for some types."""
+
+    def __init__(self, fail_types=(), scores=None):
+        self.fail_types = set(fail_types)
+        self.scores = scores or {}
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str, system: str | None = None) -> str:
+        self.prompts.append(prompt)
+        finding_type = prompt.split("Type: ", 1)[1].split("\n", 1)[0]
+        if finding_type in self.fail_types:
+            raise LLMError(f"boom for {finding_type}")
+        exploit, impact = self.scores.get(finding_type, (5, 5))
+        return json.dumps(
+            {
+                "exploitability_score": exploit,
+                "business_impact_score": impact,
+                "priority_tier": "Medium",
+                "explanation": f"About {finding_type}.",
+                "suggested_fix": f"Fix {finding_type}.",
+            }
+        )
+
+
+def raw(fid, type_, endpoint, severity="Medium", cwe=None):
+    return Finding(id=fid, type=type_, severity_raw=severity, endpoint=endpoint, cwe_id=cwe)
+
+
+def test_duplicate_issues_share_one_llm_call():
+    findings = [raw(f"f{i}", "CSP Header Not Set", f"/page{i}.html") for i in range(50)]
+    llm = CountingLLM()
+    summary = triage_findings(findings, llm)
+
+    assert len(llm.prompts) == 1
+    assert summary.llm_calls == 1
+    assert summary.groups == 1
+    assert summary.triaged == 50
+    assert all(f.priority_score == 25 for f in summary.findings)
+    assert all(f.ai_explanation == "About CSP Header Not Set." for f in summary.findings)
+
+
+def test_same_issue_in_different_contexts_is_assessed_separately():
+    findings = [
+        raw("static", "XSS", "/assets/app.js"),  # static asset
+        raw("login", "XSS", "/rest/user/login"),  # sensitive
+        raw("login2", "XSS", "/rest/user/whoami"),  # same context as login
+    ]
+    llm = CountingLLM()
+    summary = triage_findings(findings, llm)
+    assert summary.groups == 2
+    assert len(llm.prompts) == 2
+
+
+def test_context_file_rules_affect_grouping():
+    config = ContextConfig.model_validate(
+        {"endpoints": [{"pattern": "/admin*", "requires_auth": True}]}
+    )
+    findings = [raw("a", "XSS", "/admin/x"), raw("b", "XSS", "/about")]
+    summary = triage_findings(findings, CountingLLM(), context_config=config)
+    assert summary.groups == 2
+
+
+def test_results_keep_original_order_and_identity():
+    findings = [raw("f1", "B", "/1"), raw("f2", "A", "/2"), raw("f3", "B", "/3")]
+    summary = triage_findings(findings, CountingLLM())
+    assert [f.id for f in summary.findings] == ["f1", "f2", "f3"]
+    assert [f.endpoint for f in summary.findings] == ["/1", "/2", "/3"]
+    assert findings[0].priority_score is None  # inputs untouched
+
+
+def test_failed_group_is_left_untriaged_and_reported():
+    findings = [raw("ok", "Good", "/1"), raw("bad1", "Bad", "/2"), raw("bad2", "Bad", "/3")]
+    summary = triage_findings(findings, CountingLLM(fail_types={"Bad"}))
+
+    assert summary.triaged == 1
+    assert summary.failed == 2
+    assert [f.priority_score for f in summary.findings] == [25, None, None]
+    assert summary.errors == ["Bad: boom for Bad"]
+    assert not summary.stopped_early
+
+
+def test_stops_after_consecutive_failures():
+    findings = [raw(f"f{i}", f"Type{i}", "/") for i in range(6)]
+    llm = CountingLLM(fail_types={f"Type{i}" for i in range(6)})
+    summary = triage_findings(findings, llm)
+
+    assert len(llm.prompts) == MAX_CONSECUTIVE_FAILURES
+    assert summary.stopped_early
+    assert summary.failed == 6
+    assert "Stopped after 3 failures in a row" in summary.errors[-1]
+
+
+def test_a_success_resets_the_failure_count():
+    types = ["Bad1", "Bad2", "Good", "Bad3", "Bad4", "Good2"]
+    findings = [raw(t, t, "/") for t in types]
+    llm = CountingLLM(fail_types={"Bad1", "Bad2", "Bad3", "Bad4"})
+    summary = triage_findings(findings, llm)
+    assert len(llm.prompts) == 6
+    assert not summary.stopped_early
+    assert summary.triaged == 2
+
+
+def test_unparseable_replies_count_as_failures(sample_finding):
+    summary = triage_findings([sample_finding], FakeLLM("nope", "still nope"))
+    assert summary.failed == 1
+    assert "Could not triage" in summary.errors[0]
+
+
+def test_progress_is_reported_per_group():
+    findings = [raw("a", "A", "/"), raw("b", "B", "/"), raw("c", "A", "/x")]
+    calls = []
+    triage_findings(findings, CountingLLM(), on_progress=lambda d, t: calls.append((d, t)))
+    assert calls == [(1, 2), (2, 2)]
+
+
+def test_progress_continues_after_stopping_early():
+    findings = [raw(f"f{i}", f"T{i}", "/") for i in range(5)]
+    calls = []
+    triage_findings(
+        findings,
+        CountingLLM(fail_types={f"T{i}" for i in range(5)}),
+        on_progress=lambda d, t: calls.append(d),
+    )
+    assert calls == [1, 2, 3, 4, 5]
+
+
+def test_triage_findings_empty():
+    summary = triage_findings([], CountingLLM())
+    assert summary.findings == []
+    assert summary.llm_calls == 0
