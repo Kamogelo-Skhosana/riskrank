@@ -13,9 +13,15 @@ app = typer.Typer(help="riskrank — AI-powered vulnerability scanner and priori
 
 @app.command()
 def scan(
-    url: str = typer.Argument(..., help="Target URL to scan. Must be a target you own or have permission to test."),
-    output: str = typer.Option(None, "--output", help="Path to write raw findings as JSON (Phase 1)."),
-    report: str = typer.Option(None, "--report", help="Path to write the prioritized Markdown report (Phase 2)."),
+    url: str = typer.Argument(
+        ..., help="Target URL to scan. Must be a target you own or have permission to test."
+    ),
+    output: str = typer.Option(
+        None, "--output", help="Path to write raw findings as JSON (Phase 1)."
+    ),
+    report: str = typer.Option(
+        None, "--report", help="Path to write the prioritized Markdown report (Phase 2)."
+    ),
 ):
     """Run a full scan against URL and print/save the results.
 
