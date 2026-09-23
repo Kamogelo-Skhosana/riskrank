@@ -26,6 +26,7 @@ from riskrank.report.markdown import (
     group_into_issues,
     inline_code,
     md,
+    write_report,
 )
 from riskrank.scanner.models import Finding
 from tests.fixtures.sample_report_context import SAMPLE_REPORT_CONTEXT
@@ -497,3 +498,31 @@ def test_hostile_finding_text_is_escaped_in_generated_report():
     assert "\\<img src=x onerror=alert(1)\\>" in output
     assert "\\[this\\](http://phish.example)" in output
     assert "``/a`b``" in output
+
+
+# --- R031: writing the report to disk -------------------------------------------------------
+
+
+def test_write_report_writes_utf8_with_unix_newlines(tmp_path):
+    path = write_report("# Report\n\nCafé — ✓\n", tmp_path / "report.md")
+    assert path == (tmp_path / "report.md").resolve()
+    assert path.read_bytes() == "# Report\n\nCafé — ✓\n".encode()
+
+
+def test_write_report_creates_parent_directories(tmp_path):
+    path = write_report("x", tmp_path / "reports" / "2026" / "report.md")
+    assert path.read_text(encoding="utf-8") == "x"
+
+
+def test_write_report_overwrites_existing_file(tmp_path):
+    target = tmp_path / "report.md"
+    target.write_text("old", encoding="utf-8")
+    write_report("new", target)
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_write_report_unwritable_path_raises(tmp_path):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory")
+    with pytest.raises(OSError):
+        write_report("x", blocker / "report.md")

@@ -1,6 +1,6 @@
 """Tests for the CLI entry point (ZAP is faked; no live scans).
 
-Tickets: R015, R016, R017, R019
+Tickets: R015, R016, R017, R019, R031
 """
 
 import json
@@ -156,3 +156,43 @@ def test_scan_with_invalid_context_file_fails_before_scanning(fake_zap, tmp_path
     assert result.exit_code == cli.EXIT_CONFIG_ERROR
     assert "Context file error" in result.output
     assert fake_zap.calls == []  # never started the scan
+
+
+def test_scan_report_writes_markdown(fake_zap, tmp_path):
+    out = tmp_path / "report.md"
+    result = runner.invoke(app, ["scan", "http://localhost:3000", "--report", str(out)])
+
+    assert result.exit_code == 0, result.output
+    content = out.read_text(encoding="utf-8")
+    assert content.startswith("# riskrank report: http://localhost:3000\n")
+    assert "**Findings:** 1 raw, 1 distinct issue" in content
+    # Triage isn't wired into the scan yet, so the finding is listed as not triaged.
+    assert "| SQL Injection | High | 1 |" in content
+    assert "Saved Markdown report to" in result.output
+
+
+def test_scan_short_report_flag_with_json_output(fake_zap, tmp_path):
+    result = runner.invoke(
+        app,
+        [
+            "scan",
+            "http://localhost:3000",
+            "-r",
+            str(tmp_path / "r.md"),
+            "-o",
+            str(tmp_path / "f.json"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "r.md").is_file()
+    assert (tmp_path / "f.json").is_file()
+
+
+def test_scan_report_write_failure_exits_with_error(fake_zap, tmp_path):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory")
+    result = runner.invoke(
+        app, ["scan", "http://localhost:3000", "--report", str(blocker / "report.md")]
+    )
+    assert result.exit_code == cli.EXIT_SCAN_FAILED
+    assert "Could not write Markdown report" in result.output

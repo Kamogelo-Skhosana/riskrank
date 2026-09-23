@@ -11,6 +11,7 @@ Tickets: R029, R030, R031
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
@@ -235,9 +236,17 @@ def generate_markdown_report(
     return template.render(report=context)
 
 
-def write_report(content: str, path: str) -> None:
-    """Write the rendered report to disk.
+def write_report(content: str, path: str | Path) -> Path:
+    """Write the rendered report to path and return the resolved path.
 
-    TODO (R031): write content to path.
+    Parent directories are created if needed. The file is UTF-8 with Unix
+    line endings, so it looks the same on GitHub whichever OS wrote it.
+
+    Raises:
+        OSError: if the file can't be written.
     """
-    raise NotImplementedError
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+    return out_path.resolve()

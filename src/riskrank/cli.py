@@ -3,9 +3,10 @@
 Usage:
     riskrank scan <url>
 
-Tickets: R015, R016, R017, R019
+Tickets: R015, R016, R017, R019, R031
 """
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -17,6 +18,7 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 from riskrank.config import ConfigError, load_settings
 from riskrank.report.console import print_findings
 from riskrank.report.json_export import export_json
+from riskrank.report.markdown import generate_markdown_report, write_report
 from riskrank.scanner.models import Finding
 from riskrank.scanner.normalizer import normalize_alerts
 from riskrank.scanner.zap_client import ZapClient, ZapError
@@ -89,8 +91,10 @@ def scan(
         typer.Option("--output", "-o", help="Also write the raw findings to this JSON file."),
     ] = None,
     report: Annotated[
-        str | None,
-        typer.Option(help="Path to write the prioritized Markdown report (Phase 2)."),
+        Path | None,
+        typer.Option(
+            "--report", "-r", help="Also write a prioritized Markdown report to this file."
+        ),
     ] = None,
     context: Annotated[
         Path | None,
@@ -127,16 +131,31 @@ def scan(
     print_findings(findings, console=console)
 
     if output is not None:
-        try:
-            saved_to = export_json(findings, output, target_url=url)
-        except OSError as exc:
-            err_console.print(
-                f"[red]Could not write JSON output to {escape(str(output))}:[/red] {escape(str(exc))}"
-            )
-            raise typer.Exit(EXIT_SCAN_FAILED) from exc
+        saved_to = _write_or_exit(
+            "JSON output", output, lambda: export_json(findings, output, target_url=url)
+        )
         console.print(
             f"Saved {len(findings)} finding(s) to {escape(str(saved_to))}", soft_wrap=True
         )
+
+    if report is not None:
+        saved_to = _write_or_exit(
+            "Markdown report",
+            report,
+            lambda: write_report(generate_markdown_report(url, findings), report),
+        )
+        console.print(f"Saved Markdown report to {escape(str(saved_to))}", soft_wrap=True)
+
+
+def _write_or_exit(what: str, path: Path, write: Callable[[], Path]) -> Path:
+    """Run write(); on OSError print a clear message and exit with EXIT_SCAN_FAILED."""
+    try:
+        return write()
+    except OSError as exc:
+        err_console.print(
+            f"[red]Could not write {what} to {escape(str(path))}:[/red] {escape(str(exc))}"
+        )
+        raise typer.Exit(EXIT_SCAN_FAILED) from exc
 
 
 if __name__ == "__main__":
