@@ -46,6 +46,10 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 
+from riskrank import __version__
+from riskrank.scanner.models import Finding
+from riskrank.triage.triage import assign_priority_tier
+
 
 class UTCDateTime(TypeDecorator):
     """Timestamps stored as UTC and always read back timezone-aware.
@@ -183,9 +187,80 @@ def get_session_factory(engine: Engine) -> sessionmaker:
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
-def save_scan(engine, target_url: str, findings: list) -> None:
-    """Persist a completed scan and its findings.
+# --- R033: saving and loading scans ------------------------------------------------
 
-    TODO (R033): insert a Scan row and related Finding rows.
+
+def finding_to_record(finding: Finding) -> FindingRecord:
+    """Convert a Finding into a row. The tier is re-derived from the scores
+    first, so what's stored always matches the ranking."""
+    finding = assign_priority_tier(finding)
+    return FindingRecord(
+        finding_id=finding.id,
+        type=finding.type,
+        severity_raw=finding.severity_raw,
+        endpoint=finding.endpoint,
+        evidence=finding.evidence,
+        description=finding.description,
+        cwe_id=finding.cwe_id,
+        exploitability_score=finding.exploitability_score,
+        business_impact_score=finding.business_impact_score,
+        priority_score=finding.priority_score,
+        priority_tier=finding.priority_tier,
+        ai_explanation=finding.ai_explanation,
+        suggested_fix=finding.suggested_fix,
+    )
+
+
+def record_to_finding(record: FindingRecord) -> Finding:
+    """Convert a stored row back into a Finding (priority_score is recomputed)."""
+    return Finding(
+        id=record.finding_id,
+        type=record.type,
+        severity_raw=record.severity_raw,
+        endpoint=record.endpoint,
+        evidence=record.evidence,
+        description=record.description,
+        cwe_id=record.cwe_id,
+        exploitability_score=record.exploitability_score,
+        business_impact_score=record.business_impact_score,
+        priority_tier=record.priority_tier,
+        ai_explanation=record.ai_explanation,
+        suggested_fix=record.suggested_fix,
+    )
+
+
+def save_scan(
+    engine: Engine,
+    target_url: str,
+    findings: list[Finding],
+    scanned_at: datetime | None = None,
+) -> int:
+    """Persist a completed scan and its findings; return the new scan's ID.
+
+    Creates the tables first if needed, and writes the scan and all its
+    findings in one transaction: either everything is saved or nothing is.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: if the database can't be written.
     """
-    raise NotImplementedError
+    init_db(engine)
+    scan = ScanRecord(
+        target_url=target_url,
+        scanned_at=scanned_at or datetime.now(UTC),
+        riskrank_version=__version__,
+        finding_count=len(findings),
+        findings=[finding_to_record(f) for f in findings],
+    )
+    with get_session_factory(engine).begin() as session:
+        session.add(scan)
+        session.flush()  # assigns scan.id
+        return scan.id
+
+
+def load_scan(engine: Engine, scan_id: int) -> tuple[ScanRecord, list[Finding]] | None:
+    """Load a saved scan and its findings (in saved order), or None if unknown."""
+    with get_session_factory(engine)() as session:
+        scan = session.get(ScanRecord, scan_id)
+        if scan is None:
+            return None
+        return scan, [record_to_finding(r) for r in scan.findings]

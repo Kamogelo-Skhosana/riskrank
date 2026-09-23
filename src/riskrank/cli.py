@@ -3,7 +3,7 @@
 Usage:
     riskrank scan <url>
 
-Tickets: R015, R016, R017, R019, R031
+Tickets: R015, R016, R017, R019, R031, R033
 """
 
 from collections.abc import Callable
@@ -14,11 +14,13 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
+from sqlalchemy.exc import SQLAlchemyError
 
 from riskrank.config import ConfigError, load_settings
 from riskrank.report.console import print_findings
 from riskrank.report.json_export import export_json
 from riskrank.report.markdown import generate_markdown_report, write_report
+from riskrank.report.persistence import get_engine, save_scan
 from riskrank.scanner.models import Finding
 from riskrank.scanner.normalizer import normalize_alerts
 from riskrank.scanner.zap_client import ZapClient, ZapError
@@ -96,6 +98,13 @@ def scan(
             "--report", "-r", help="Also write a prioritized Markdown report to this file."
         ),
     ] = None,
+    save: Annotated[
+        bool,
+        typer.Option(
+            "--save/--no-save",
+            help="Save the scan and its findings to the database (DATABASE_URL in .env).",
+        ),
+    ] = True,
     context: Annotated[
         Path | None,
         typer.Option(
@@ -113,7 +122,8 @@ def scan(
     console.print(f"[bold]riskrank[/bold] scanning {escape(url)}")
 
     try:
-        client = ZapClient.from_settings(load_settings())
+        settings = load_settings()
+        client = ZapClient.from_settings(settings)
     except ConfigError as exc:
         err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_CONFIG_ERROR) from exc
@@ -145,6 +155,28 @@ def scan(
             lambda: write_report(generate_markdown_report(url, findings), report),
         )
         console.print(f"Saved Markdown report to {escape(str(saved_to))}", soft_wrap=True)
+
+    if save:
+        _save_to_database(settings.database_url, url, findings)
+
+
+def _save_to_database(database_url: str, url: str, findings: list[Finding]) -> None:
+    """Save the scan to the database. A failure here is reported as a warning
+    rather than failing the command: the scan itself succeeded and any
+    --output/--report files have already been written."""
+    try:
+        engine = get_engine(database_url)
+        try:
+            scan_id = save_scan(engine, url, findings)
+        finally:
+            engine.dispose()
+    except (SQLAlchemyError, OSError) as exc:
+        err_console.print(
+            f"[yellow]Warning: could not save the scan to the database:[/yellow] "
+            f"{escape(str(exc).splitlines()[0])}"
+        )
+        return
+    console.print(f"Saved scan #{scan_id} to the database", soft_wrap=True)
 
 
 def _write_or_exit(what: str, path: Path, write: Callable[[], Path]) -> Path:

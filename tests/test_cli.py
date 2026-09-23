@@ -1,6 +1,6 @@
 """Tests for the CLI entry point (ZAP is faked; no live scans).
 
-Tickets: R015, R016, R017, R019, R031
+Tickets: R015, R016, R017, R019, R031, R033
 """
 
 import json
@@ -48,10 +48,16 @@ class FakeZapClient:
 
 
 @pytest.fixture
-def fake_zap(monkeypatch, sample_raw_zap_alert):
-    """Patch settings + ZapClient so `riskrank scan` uses FakeZapClient."""
+def db_file(tmp_path):
+    return tmp_path / "riskrank.db"
+
+
+@pytest.fixture
+def fake_zap(monkeypatch, sample_raw_zap_alert, db_file):
+    """Patch settings + ZapClient so `riskrank scan` uses FakeZapClient
+    and saves to a temporary database."""
     client = FakeZapClient(alerts=[sample_raw_zap_alert])
-    settings = Settings("http://localhost:8080", "key", "", "model", "sqlite:///x.db")
+    settings = Settings("http://localhost:8080", "key", "", "model", f"sqlite:///{db_file}")
     monkeypatch.setattr(cli, "load_settings", lambda: settings)
     monkeypatch.setattr(cli.ZapClient, "from_settings", classmethod(lambda cls, s: client))
     return client
@@ -125,7 +131,7 @@ def test_scan_short_output_flag(fake_zap, tmp_path):
 
 def test_scan_without_output_writes_no_file(fake_zap, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "http://localhost:3000", "--no-save"])
     assert result.exit_code == 0
     assert list(tmp_path.iterdir()) == []
 
@@ -196,3 +202,40 @@ def test_scan_report_write_failure_exits_with_error(fake_zap, tmp_path):
     )
     assert result.exit_code == cli.EXIT_SCAN_FAILED
     assert "Could not write Markdown report" in result.output
+
+
+def test_scan_saves_to_database_by_default(fake_zap, db_file):
+    from riskrank.report.persistence import get_engine, load_scan
+
+    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+
+    assert result.exit_code == 0, result.output
+    assert "Saved scan #1 to the database" in result.output
+    engine = get_engine(f"sqlite:///{db_file}")
+    scan, findings = load_scan(engine, 1)
+    engine.dispose()
+    assert scan.target_url == "http://localhost:3000"
+    assert scan.finding_count == 1
+    assert [f.type for f in findings] == ["SQL Injection"]
+
+
+def test_each_scan_gets_a_new_id(fake_zap):
+    runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    assert "Saved scan #2 to the database" in result.output
+
+
+def test_no_save_skips_the_database(fake_zap, db_file):
+    result = runner.invoke(app, ["scan", "http://localhost:3000", "--no-save"])
+    assert result.exit_code == 0
+    assert "Saved scan" not in result.output
+    assert not db_file.exists()
+
+
+def test_database_failure_is_a_warning_not_an_error(fake_zap, db_file, tmp_path):
+    db_file.mkdir()  # a directory where the database file should be
+    out = tmp_path / "findings.json"
+    result = runner.invoke(app, ["scan", "http://localhost:3000", "-o", str(out)])
+    assert result.exit_code == 0, result.output
+    assert "Warning: could not save the scan to the database" in result.output
+    assert out.is_file()  # other outputs still written

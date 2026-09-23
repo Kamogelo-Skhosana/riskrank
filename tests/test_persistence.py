@@ -9,13 +9,17 @@ import pytest
 from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
+from riskrank import __version__
 from riskrank.report.persistence import (
     FindingRecord,
     ScanRecord,
     get_engine,
     get_session_factory,
     init_db,
+    load_scan,
+    save_scan,
 )
+from riskrank.scanner.models import Finding
 
 
 @pytest.fixture
@@ -67,8 +71,6 @@ def test_init_db_creates_both_tables(engine):
 
 
 def test_findings_columns_cover_every_finding_field(engine):
-    from riskrank.scanner.models import Finding
-
     columns = {c["name"] for c in inspect(engine).get_columns("findings")}
     for field in Finding.model_fields:
         expected = "finding_id" if field == "id" else field
@@ -231,3 +233,104 @@ def test_utc_datetime_passes_none_through():
     column_type = UTCDateTime()
     assert column_type.process_bind_param(None, None) is None
     assert column_type.process_result_value(None, None) is None
+
+
+# --- R033: save_scan / load_scan -------------------------------------------------------
+
+
+def triaged_finding(fid="finding-001", **overrides) -> Finding:
+    values = {
+        "id": fid,
+        "type": "SQL Injection",
+        "severity_raw": "High",
+        "endpoint": "/rest/user/login",
+        "evidence": "' OR 1=1--",
+        "description": "SQL injection may be possible.",
+        "cwe_id": 89,
+        "exploitability_score": 9,
+        "business_impact_score": 9,
+        "priority_tier": "Critical",
+        "ai_explanation": "Public login is injectable.",
+        "suggested_fix": "Use parameterised queries.",
+    }
+    values.update(overrides)
+    return Finding(**values)
+
+
+def test_save_scan_round_trips_every_field(engine):
+    findings = [
+        triaged_finding(),
+        Finding(id="finding-002", type="Info", severity_raw="Informational", endpoint="/"),
+    ]
+    when = datetime(2026, 9, 24, 10, 15, tzinfo=UTC)
+
+    scan_id = save_scan(engine, "http://localhost:3000", findings, scanned_at=when)
+    scan, loaded = load_scan(engine, scan_id)
+
+    assert scan.target_url == "http://localhost:3000"
+    assert scan.scanned_at == when
+    assert scan.riskrank_version == __version__
+    assert scan.finding_count == 2
+    assert loaded == findings  # every field, incl. untriaged Nones, survives
+
+
+def test_save_scan_stores_priority_score_for_sql_queries(engine):
+    save_scan(engine, "t", [triaged_finding()])
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT priority_score FROM findings").scalar() == 81
+
+
+def test_save_scan_rederives_inconsistent_tier(engine):
+    stale = triaged_finding(
+        exploitability_score=2, business_impact_score=2, priority_tier="Critical"
+    )
+    scan_id = save_scan(engine, "t", [stale])
+    _, [loaded] = load_scan(engine, scan_id)
+    assert loaded.priority_tier == "Low"
+
+
+def test_save_scan_creates_tables_if_missing():
+    fresh = get_engine("sqlite:///:memory:")  # no init_db()
+    scan_id = save_scan(fresh, "t", [])
+    assert load_scan(fresh, scan_id)[0].finding_count == 0
+    fresh.dispose()
+
+
+def test_save_scan_returns_increasing_ids(engine):
+    assert [save_scan(engine, "t", []) for _ in range(3)] == [1, 2, 3]
+
+
+def test_scanned_at_defaults_to_now_when_saving(engine):
+    scan, _ = load_scan(engine, save_scan(engine, "t", []))
+    assert abs((datetime.now(UTC) - scan.scanned_at).total_seconds()) < 60
+
+
+def test_findings_load_in_saved_order(engine):
+    findings = [triaged_finding(f"finding-{i:03d}", endpoint=f"/{i}") for i in range(5, 0, -1)]
+    _, loaded = load_scan(engine, save_scan(engine, "t", findings))
+    assert [f.id for f in loaded] == [f.id for f in findings]
+
+
+def test_load_unknown_scan_returns_none(engine):
+    assert load_scan(engine, 999) is None
+
+
+def test_save_is_all_or_nothing(engine):
+    """A bad finding (duplicate ID) must not leave a half-saved scan behind."""
+    duplicate = [triaged_finding(), triaged_finding()]
+    with pytest.raises(IntegrityError):
+        save_scan(engine, "t", duplicate)
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT COUNT(*) FROM scans").scalar() == 0
+        assert conn.exec_driver_sql("SELECT COUNT(*) FROM findings").scalar() == 0
+
+
+def test_save_and_load_with_a_file_database(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path / 'riskrank.db'}")
+    scan_id = save_scan(engine, "t", [triaged_finding()])
+    engine.dispose()
+
+    reopened = get_engine(f"sqlite:///{tmp_path / 'riskrank.db'}")
+    _, [loaded] = load_scan(reopened, scan_id)
+    reopened.dispose()
+    assert loaded.priority_tier == "Critical"
