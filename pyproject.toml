@@ -9,6 +9,10 @@ license = { text = "MIT" }
 [project.scripts]
 riskrank = "riskrank.cli:app"
 
+[tool.setuptools.package-data]
+# Ship the Jinja2 report templates with the package (R029).
+riskrank = ["report/templates/*.j2"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

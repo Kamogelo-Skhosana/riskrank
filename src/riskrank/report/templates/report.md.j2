@@ -1,0 +1,103 @@
+{#-
+  riskrank Markdown report template (R029).
+
+  Rendered by riskrank.report.markdown (R030). Context:
+
+    report.target_url        str
+    report.scanned_at        str, e.g. "2026-09-24 10:15 UTC"
+    report.riskrank_version  str
+    report.total_findings    int   raw scanner findings
+    report.issue_count       int   distinct issues after grouping by type
+    report.summary           list of {tier, issues, occurrences}, Critical -> Low, then "Not triaged"
+    report.fix_first         list[Issue]  Critical + High, highest score first
+    report.other             list[Issue]  Medium + Low
+    report.untriaged         list[Issue]  no AI scores (triage skipped or failed)
+
+  Issue (one per finding type, merging every endpoint it was found on):
+    rank, type, tier, score, exploitability, impact, severity_raw, cwe_id,
+    explanation, suggested_fix, evidence, occurrences,
+    endpoints (list[str], capped), more_endpoints (int, how many were cut)
+
+  Filters (riskrank.report.markdown): md (escape inline Markdown),
+  inline_code (backtick span safe for any content), code_block (fenced block
+  safe for any content), cwe_link (89 -> link to cwe.mitre.org).
+-#}
+# riskrank report: {{ report.target_url | md }}
+
+**Scanned:** {{ report.scanned_at }} · **Findings:** {{ report.total_findings }} raw, {{ report.issue_count }} distinct {{ "issue" if report.issue_count == 1 else "issues" }} · **riskrank** v{{ report.riskrank_version }}
+
+## Summary
+
+| Priority | Issues | Occurrences |
+|---|---:|---:|
+{% for row in report.summary %}
+| {{ row.tier }} | {{ row.issues }} | {{ row.occurrences }} |
+{% endfor %}
+
+{% if report.fix_first %}
+**Fix first:** {{ report.fix_first[0].type | md }} ({{ report.fix_first[0].tier }}, score {{ report.fix_first[0].score }}/100).
+{% elif report.other %}
+No Critical or High issues. The highest-priority issue is {{ report.other[0].type | md }} ({{ report.other[0].tier }}).
+{% else %}
+No triaged issues.
+{% endif %}
+{% macro issue_section(issue) %}
+
+### {{ issue.rank }}. [{{ issue.tier }}] {{ issue.type | md }}
+
+- **Score:** {{ issue.score }}/100 (exploitability {{ issue.exploitability }}/10 × business impact {{ issue.impact }}/10)
+- **Scanner severity:** {{ issue.severity_raw }}{% if issue.cwe_id %} · {{ issue.cwe_id | cwe_link }}{% endif %}
+
+- **Found on {{ issue.occurrences }} {{ "endpoint" if issue.occurrences == 1 else "endpoints" }}:**
+{% for endpoint in issue.endpoints %}
+  - {{ endpoint | inline_code }}
+{% endfor %}
+{% if issue.more_endpoints %}
+  - …and {{ issue.more_endpoints }} more
+{% endif %}
+
+**Why it matters:** {{ issue.explanation | md }}
+
+**How to fix:** {{ issue.suggested_fix | md }}
+{% if issue.evidence %}
+
+<details>
+<summary>Evidence from the scanner</summary>
+
+{{ issue.evidence | code_block }}
+
+</details>
+{% endif %}
+{% endmacro %}
+{% if report.fix_first %}
+
+## Fix first (Critical and High)
+{% for issue in report.fix_first %}
+{{ issue_section(issue) }}
+{%- endfor %}
+{% endif %}
+{% if report.other %}
+
+## Other issues (Medium and Low)
+{% for issue in report.other %}
+{{ issue_section(issue) }}
+{%- endfor %}
+{% endif %}
+{% if report.untriaged %}
+
+## Not triaged
+
+These findings have no AI assessment yet, so they are listed by the scanner's own severity.
+
+| Issue | Scanner severity | Occurrences |
+|---|---|---:|
+{% for issue in report.untriaged %}
+| {{ issue.type | md }} | {{ issue.severity_raw }} | {{ issue.occurrences }} |
+{% endfor %}
+{% endif %}
+
+## How to read this report
+
+- Findings of the same type are grouped into one issue, listing every endpoint it was found on. An issue's score and advice come from its highest-scoring occurrence.
+- **Score** = exploitability × business impact (1–100), judged by an AI model in the context of each endpoint. **Critical** ≥ 64, **High** ≥ 36, **Medium** ≥ 16, **Low** below that.
+- Explanations and fixes are AI-generated. Review them before acting, and only test systems you own or are authorised to test.
