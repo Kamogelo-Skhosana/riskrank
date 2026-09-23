@@ -11,6 +11,8 @@ string, so it doesn't end up in logs.
 Tickets: R006, R007, R008, R009, R010
 """
 
+import time
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -18,6 +20,10 @@ import requests
 from riskrank.config import Settings
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
+DEFAULT_POLL_INTERVAL_SECONDS = 2.0
+DEFAULT_SPIDER_TIMEOUT_SECONDS = 10 * 60
+
+ProgressCallback = Callable[[int], None]
 
 
 class ZapError(Exception):
@@ -26,6 +32,10 @@ class ZapError(Exception):
 
 class ZapConnectionError(ZapError):
     """Raised when the ZAP instance can't be reached at all."""
+
+
+class ZapScanTimeoutError(ZapError):
+    """Raised when a spider/scan doesn't finish within the allowed time."""
 
 
 class ZapClient:
@@ -97,10 +107,7 @@ class ZapClient:
     def get_version(self) -> str:
         """Return the version string of the connected ZAP instance."""
         body = self._request("core", "view", "version")
-        try:
-            return str(body["version"])
-        except (KeyError, TypeError) as exc:
-            raise ZapError(f"Unexpected response from ZAP core/view/version: {body!r}") from exc
+        return self._read_field(body, "version", "core/view/version")
 
     def check_connection(self) -> str:
         """Verify ZAP is reachable and the API key is accepted.
@@ -110,20 +117,84 @@ class ZapClient:
         """
         return self.get_version()
 
-    def start_spider(self, target_url: str) -> str:
-        """Trigger a spider (crawl) scan against target_url.
+    def _read_field(self, body: dict[str, Any], field: str, endpoint: str) -> str:
+        """Pull a required field out of a ZAP response, or raise ZapError."""
+        try:
+            return str(body[field])
+        except (KeyError, TypeError) as exc:
+            raise ZapError(f"Unexpected response from ZAP {endpoint}: {body!r}") from exc
 
-        TODO (R007): call ZAP's /JSON/spider/action/scan/ endpoint,
-        return the scan ID.
-        """
-        raise NotImplementedError
+    def _parse_progress(self, body: dict[str, Any], endpoint: str) -> int:
+        """Parse ZAP's string percentage ("0".."100") into an int."""
+        value = self._read_field(body, "status", endpoint)
+        try:
+            return max(0, min(100, int(value)))
+        except ValueError as exc:
+            raise ZapError(f"ZAP {endpoint} returned a non-numeric status: {value!r}") from exc
+
+    def _wait_until_complete(
+        self,
+        poll: Callable[[str], int],
+        scan_id: str,
+        label: str,
+        poll_interval: float,
+        timeout: float,
+        on_progress: ProgressCallback | None,
+        sleep: Callable[[float], None],
+        clock: Callable[[], float],
+    ) -> None:
+        """Call poll(scan_id) until it reports 100%, or raise on timeout."""
+        deadline = clock() + timeout
+        while True:
+            progress = poll(scan_id)
+            if on_progress:
+                on_progress(progress)
+            if progress >= 100:
+                return
+            if clock() >= deadline:
+                raise ZapScanTimeoutError(
+                    f"ZAP {label} {scan_id} did not finish within {timeout:.0f}s "
+                    f"(last progress: {progress}%)."
+                )
+            sleep(poll_interval)
+
+    def start_spider(self, target_url: str) -> str:
+        """Trigger a spider (crawl) scan against target_url and return its scan ID."""
+        body = self._request("spider", "action", "scan", {"url": target_url})
+        return self._read_field(body, "scan", "spider/action/scan")
 
     def poll_spider(self, scan_id: str) -> int:
-        """Poll spider scan progress. Returns percent complete (0-100).
+        """Return spider progress for scan_id as a percentage (0-100)."""
+        body = self._request("spider", "view", "status", {"scanId": scan_id})
+        return self._parse_progress(body, "spider/view/status")
 
-        TODO (R007): call /JSON/spider/view/status/
+    def run_spider(
+        self,
+        target_url: str,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        timeout: float = DEFAULT_SPIDER_TIMEOUT_SECONDS,
+        on_progress: ProgressCallback | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> str:
+        """Start a spider against target_url and block until it completes.
+
+        Args:
+            target_url: the URL to crawl.
+            poll_interval: seconds between progress checks.
+            timeout: give up (ZapScanTimeoutError) after this many seconds.
+            on_progress: optional callback receiving each progress percentage,
+                e.g. to drive a CLI progress display.
+            sleep, clock: injectable for tests.
+
+        Returns:
+            The spider scan ID.
         """
-        raise NotImplementedError
+        scan_id = self.start_spider(target_url)
+        self._wait_until_complete(
+            self.poll_spider, scan_id, "spider", poll_interval, timeout, on_progress, sleep, clock
+        )
+        return scan_id
 
     def start_active_scan(self, target_url: str) -> str:
         """Trigger an active scan against target_url.
