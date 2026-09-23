@@ -4,13 +4,22 @@ Captures what riskrank needs to know about the target to triage
 findings meaningfully: which endpoints are public-facing, which
 handle sensitive/user data, and which require authentication.
 
+Context can come from two places:
+  * inference from endpoint names (infer_default_context, R020), and
+  * a TOML context file the user supplies per scan (load_context_config, R019),
+    whose rules override the inferred values.
+resolve_context() combines both for a given endpoint.
+
 Tickets: R018, R019, R020
 """
 
 import re
+import tomllib
+from fnmatch import fnmatchcase
+from pathlib import Path
 from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 
 class TargetContext(BaseModel):
@@ -218,3 +227,98 @@ def infer_default_context(endpoint: str) -> TargetContext:
         requires_auth=requires_auth,
         notes=notes,
     )
+
+
+# --- R019: user-supplied context file -------------------------------------------
+
+
+class ContextConfigError(Exception):
+    """Raised when a context file is missing, not valid TOML, or has bad fields."""
+
+
+class ContextOverrides(BaseModel):
+    """Fields a user can set; anything left out keeps the inferred value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    public_facing: bool | None = None
+    handles_sensitive_data: bool | None = None
+    requires_auth: bool | None = None
+    notes: str | None = None
+
+    def apply_to(self, context: TargetContext, source: str) -> TargetContext:
+        updates = self.model_dump(exclude_none=True, exclude={"notes"})
+        if not updates and self.notes is None:
+            return context
+        note = f"{source}: {self.notes}" if self.notes else source
+        notes = f"{context.notes} {note}".strip() if context.notes else note
+        return context.model_copy(update={**updates, "notes": notes})
+
+
+class EndpointRule(ContextOverrides):
+    """Overrides for endpoints whose path matches a glob pattern, e.g. "/api/*"."""
+
+    pattern: str
+
+    def matches(self, path: str) -> bool:
+        return fnmatchcase(path, self.pattern.lower())
+
+
+class ContextConfig(BaseModel):
+    """Parsed context file. See examples/context.example.toml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    infer: bool = True
+    default: ContextOverrides = ContextOverrides()
+    endpoints: list[EndpointRule] = []
+
+
+def load_context_config(path: str | Path) -> ContextConfig:
+    """Load and validate a TOML context file.
+
+    Raises:
+        ContextConfigError: with a message naming the file and the problem.
+    """
+    path = Path(path)
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ContextConfigError(f"Context file not found: {path}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ContextConfigError(f"Context file {path} is not valid TOML: {exc}") from exc
+    except OSError as exc:
+        raise ContextConfigError(f"Could not read context file {path}: {exc}") from exc
+
+    try:
+        return ContextConfig.model_validate(data)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}" for err in exc.errors()
+        )
+        raise ContextConfigError(f"Invalid context file {path}: {problems}") from exc
+
+
+def resolve_context(endpoint: str, config: ContextConfig | None = None) -> TargetContext:
+    """Work out the TargetContext for one endpoint.
+
+    Order, each step overriding the previous one:
+      1. inference from the endpoint name (skipped if the file sets infer = false)
+      2. the file's [default] section
+      3. the FIRST [[endpoints]] rule whose pattern matches the path
+
+    Patterns are shell-style globs matched against the lowercased path:
+    "*" matches anything (including "/"), so "/api/*" covers every API route.
+    """
+    if config is None:
+        return infer_default_context(endpoint)
+
+    context = infer_default_context(endpoint) if config.infer else TargetContext()
+    context = config.default.apply_to(context, "Context file default")
+
+    path = _path_of(endpoint)
+    for rule in config.endpoints:
+        if rule.matches(path):
+            context = rule.apply_to(context, f"Context file rule '{rule.pattern}'")
+            break
+    return context

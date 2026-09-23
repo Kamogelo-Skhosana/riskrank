@@ -1,0 +1,46 @@
+# riskrank target context file (R019)
+#
+# Tells the triage step what riskrank can't see from the scan alone: which
+# parts of your app are public, which handle sensitive data, and which need
+# a login. Use it with:
+#
+#     riskrank scan http://localhost:3000 --context examples/context.example.toml
+#
+# How a value is chosen for each endpoint (later steps override earlier ones):
+#   1. riskrank's guess from the endpoint name (turn off with: infer = false)
+#   2. the [default] section below
+#   3. the FIRST [[endpoints]] rule whose pattern matches the path
+#
+# Every field is optional; leave one out to keep the value from the step before.
+# Patterns are globs matched against the (lowercased) path: "*" matches
+# anything, including "/", so "/api/*" covers every route under /api.
+#
+# This example describes OWASP Juice Shop.
+
+infer = true
+
+[default]
+public_facing = true
+notes = "OWASP Juice Shop: intentionally vulnerable online shop used for testing."
+
+[[endpoints]]
+pattern = "/rest/user/*"
+handles_sensitive_data = true
+notes = "Login, registration and password reset."
+
+[[endpoints]]
+pattern = "/api/cards*"
+handles_sensitive_data = true
+requires_auth = true
+notes = "Stored payment cards."
+
+[[endpoints]]
+pattern = "/ftp*"
+handles_sensitive_data = true
+requires_auth = false
+notes = "Publicly browsable file share containing backups and confidential documents."
+
+[[endpoints]]
+pattern = "/assets/*"
+handles_sensitive_data = false
+notes = "Static front-end files."

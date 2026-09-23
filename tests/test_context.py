@@ -1,11 +1,20 @@
-"""Tests for default target-context inference.
+"""Tests for target context: inference (R020) and context files (R019).
 
-Ticket: R020
+Tickets: R019, R020
 """
+
+from pathlib import Path
 
 import pytest
 
-from riskrank.triage.context import TargetContext, infer_default_context
+from riskrank.triage.context import (
+    ContextConfig,
+    ContextConfigError,
+    TargetContext,
+    infer_default_context,
+    load_context_config,
+    resolve_context,
+)
 
 
 @pytest.mark.parametrize(
@@ -121,3 +130,147 @@ def test_multiple_reasons_are_all_recorded():
     assert ctx.handles_sensitive_data and ctx.requires_auth
     for reason in ("user/personal data", "API endpoint", "admin area"):
         assert reason in ctx.notes
+
+
+# --- R019: context file -------------------------------------------------------
+
+EXAMPLE_FILE = Path(__file__).resolve().parent.parent / "examples" / "context.example.toml"
+
+
+def write(tmp_path, text: str) -> Path:
+    path = tmp_path / "context.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_example_file_is_valid():
+    config = load_context_config(EXAMPLE_FILE)
+    assert config.infer is True
+    assert [r.pattern for r in config.endpoints][:2] == ["/rest/user/*", "/api/cards*"]
+
+
+def test_without_config_falls_back_to_inference():
+    assert resolve_context("/rest/user/login") == infer_default_context("/rest/user/login")
+
+
+def test_empty_file_keeps_inference(tmp_path):
+    config = load_context_config(write(tmp_path, ""))
+    assert resolve_context("/admin", config) == infer_default_context("/admin")
+
+
+def test_endpoint_rule_overrides_inferred_values(tmp_path):
+    config = load_context_config(
+        write(
+            tmp_path,
+            """
+[[endpoints]]
+pattern = "/admin*"
+public_facing = false
+requires_auth = true
+notes = "VPN-only admin panel."
+""",
+        )
+    )
+    ctx = resolve_context("/admin/users", config)
+    assert ctx.public_facing is False
+    assert ctx.requires_auth is True
+    assert ctx.handles_sensitive_data is True  # not overridden -> inferred value kept
+    assert "admin area" in ctx.notes  # inferred reason kept
+    assert "Context file rule '/admin*': VPN-only admin panel." in ctx.notes
+
+
+def test_default_section_applies_to_every_endpoint(tmp_path):
+    config = load_context_config(write(tmp_path, "[default]\npublic_facing = false\n"))
+    assert resolve_context("/about", config).public_facing is False
+    assert resolve_context("/api/x", config).public_facing is False
+
+
+def test_rule_overrides_default(tmp_path):
+    config = load_context_config(
+        write(
+            tmp_path,
+            """
+[default]
+public_facing = false
+
+[[endpoints]]
+pattern = "/shop/*"
+public_facing = true
+""",
+        )
+    )
+    assert resolve_context("/shop/item/1", config).public_facing is True
+    assert resolve_context("/other", config).public_facing is False
+
+
+def test_first_matching_rule_wins(tmp_path):
+    config = load_context_config(
+        write(
+            tmp_path,
+            """
+[[endpoints]]
+pattern = "/api/public/*"
+handles_sensitive_data = false
+
+[[endpoints]]
+pattern = "/api/*"
+handles_sensitive_data = true
+""",
+        )
+    )
+    assert resolve_context("/api/public/news", config).handles_sensitive_data is False
+    assert resolve_context("/api/users", config).handles_sensitive_data is True
+
+
+def test_infer_false_starts_from_plain_defaults(tmp_path):
+    config = load_context_config(write(tmp_path, "infer = false\n"))
+    ctx = resolve_context("/rest/user/login", config)
+    assert ctx.handles_sensitive_data is False
+    assert "Inferred" not in ctx.notes
+
+
+def test_patterns_match_case_insensitively_and_full_urls(tmp_path):
+    config = load_context_config(
+        write(tmp_path, '[[endpoints]]\npattern = "/API/*"\nrequires_auth = true\n')
+    )
+    assert resolve_context("http://host:3000/api/Things?x=1", config).requires_auth is True
+
+
+def test_missing_file_raises(tmp_path):
+    with pytest.raises(ContextConfigError, match="not found"):
+        load_context_config(tmp_path / "nope.toml")
+
+
+def test_invalid_toml_raises(tmp_path):
+    with pytest.raises(ContextConfigError, match="not valid TOML"):
+        load_context_config(write(tmp_path, "[[endpoints]\npattern = "))
+
+
+def test_unknown_field_is_rejected(tmp_path):
+    """A typo like 'requires_login' must fail loudly, not be silently ignored."""
+    path = write(tmp_path, '[[endpoints]]\npattern = "/x"\nrequires_login = true\n')
+    with pytest.raises(ContextConfigError, match=r"endpoints\.0\.requires_login"):
+        load_context_config(path)
+
+
+def test_wrong_type_is_rejected(tmp_path):
+    path = write(tmp_path, '[default]\npublic_facing = "maybe"\n')
+    with pytest.raises(ContextConfigError, match=r"default\.public_facing"):
+        load_context_config(path)
+
+
+def test_rule_without_pattern_is_rejected(tmp_path):
+    with pytest.raises(ContextConfigError, match=r"endpoints\.0\.pattern"):
+        load_context_config(write(tmp_path, "[[endpoints]]\nrequires_auth = true\n"))
+
+
+def test_config_defaults():
+    config = ContextConfig()
+    assert config.infer is True
+    assert config.endpoints == []
+
+
+def test_unreadable_path_raises(tmp_path):
+    """E.g. pointing --context at a directory instead of a file."""
+    with pytest.raises(ContextConfigError, match="Could not read context file"):
+        load_context_config(tmp_path)

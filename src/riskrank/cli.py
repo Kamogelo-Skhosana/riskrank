@@ -3,7 +3,7 @@
 Usage:
     riskrank scan <url>
 
-Tickets: R015, R016, R017
+Tickets: R015, R016, R017, R019
 """
 
 from pathlib import Path
@@ -20,6 +20,7 @@ from riskrank.report.json_export import export_json
 from riskrank.scanner.models import Finding
 from riskrank.scanner.normalizer import normalize_alerts
 from riskrank.scanner.zap_client import ZapClient, ZapError
+from riskrank.triage.context import ContextConfig, ContextConfigError, load_context_config
 
 app = typer.Typer(help="riskrank — AI-powered vulnerability scanner and prioritizer.")
 console = Console()
@@ -58,6 +59,23 @@ def run_scan(client: ZapClient, url: str) -> list[Finding]:
     return normalize_alerts(client.get_alerts(url))
 
 
+def _load_target_context(path: Path | None) -> ContextConfig | None:
+    """Load --context if given, exiting with a config error if it's invalid."""
+    if path is None:
+        return None
+    try:
+        config = load_context_config(path)
+    except ContextConfigError as exc:
+        err_console.print(f"[red]Context file error:[/red] {escape(str(exc))}")
+        raise typer.Exit(EXIT_CONFIG_ERROR) from exc
+    console.print(
+        f"Using target context from {escape(str(path))} "
+        f"({len(config.endpoints)} endpoint rule(s))",
+        soft_wrap=True,
+    )
+    return config
+
+
 @app.command()
 def scan(
     url: Annotated[
@@ -74,6 +92,17 @@ def scan(
         str | None,
         typer.Option(help="Path to write the prioritized Markdown report (Phase 2)."),
     ] = None,
+    context: Annotated[
+        Path | None,
+        typer.Option(
+            "--context",
+            "-c",
+            help=(
+                "TOML file describing the target (public/sensitive/auth per endpoint). "
+                "See examples/context.example.toml."
+            ),
+        ),
+    ] = None,
 ):
     """Run a full scan against URL and print/save the results."""
     # TODO (R018-R034): wire up triage -> ranking -> report generation (Phase 2)
@@ -84,6 +113,10 @@ def scan(
     except ConfigError as exc:
         err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_CONFIG_ERROR) from exc
+
+    # Validate the context file before the (long) scan, so a typo fails fast.
+    # R023 will keep the returned config and pass it to the triage step.
+    _load_target_context(context)
 
     try:
         findings = run_scan(client, url)

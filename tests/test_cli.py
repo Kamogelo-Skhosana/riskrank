@@ -1,6 +1,6 @@
 """Tests for the CLI entry point (ZAP is faked; no live scans).
 
-Tickets: R015, R016, R017
+Tickets: R015, R016, R017, R019
 """
 
 import json
@@ -138,3 +138,21 @@ def test_scan_output_write_failure_exits_with_error(fake_zap, tmp_path):
     )
     assert result.exit_code == cli.EXIT_SCAN_FAILED
     assert "Could not write JSON output" in result.output
+
+
+def test_scan_with_valid_context_file(fake_zap, tmp_path):
+    ctx = tmp_path / "context.toml"
+    ctx.write_text('[[endpoints]]\npattern = "/api/*"\nrequires_auth = true\n', encoding="utf-8")
+    result = runner.invoke(app, ["scan", "http://localhost:3000", "--context", str(ctx)])
+    assert result.exit_code == 0, result.output
+    assert "Using target context from" in result.output
+    assert "(1 endpoint rule(s))" in result.output
+
+
+def test_scan_with_invalid_context_file_fails_before_scanning(fake_zap, tmp_path):
+    ctx = tmp_path / "context.toml"
+    ctx.write_text("[default]\nrequires_login = true\n", encoding="utf-8")
+    result = runner.invoke(app, ["scan", "http://localhost:3000", "-c", str(ctx)])
+    assert result.exit_code == cli.EXIT_CONFIG_ERROR
+    assert "Context file error" in result.output
+    assert fake_zap.calls == []  # never started the scan
