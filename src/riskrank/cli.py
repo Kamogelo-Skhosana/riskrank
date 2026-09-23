@@ -11,6 +11,14 @@ import typer
 app = typer.Typer(help="riskrank — AI-powered vulnerability scanner and prioritizer.")
 
 
+@app.callback()
+def main() -> None:
+    """riskrank — AI-powered vulnerability scanner and prioritizer."""
+    # An explicit callback keeps Typer in multi-command mode, so the CLI is
+    # invoked as `riskrank scan <url>`. Without it, Typer collapses a
+    # single-command app and `scan` would be rejected as an extra argument.
+
+
 @app.command()
 def scan(
     url: str = typer.Argument(

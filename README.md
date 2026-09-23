@@ -49,6 +49,7 @@ cd riskrank
 # Create and activate a virtual environment
 python -m venv .venv
 source .venv/bin/activate        # macOS / Linux
+# source .venv/Scripts/activate  # Windows (Git Bash)
 # .venv\Scripts\activate         # Windows (PowerShell / cmd)
 
 # Install riskrank (editable) plus dev tools
