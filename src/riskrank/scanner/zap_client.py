@@ -22,6 +22,9 @@ from riskrank.config import Settings
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_SPIDER_TIMEOUT_SECONDS = 10 * 60
+# Active scans send attack payloads to every discovered URL, so they take far
+# longer than a crawl.
+DEFAULT_ACTIVE_SCAN_TIMEOUT_SECONDS = 60 * 60
 
 ProgressCallback = Callable[[int], None]
 
@@ -197,18 +200,48 @@ class ZapClient:
         return scan_id
 
     def start_active_scan(self, target_url: str) -> str:
-        """Trigger an active scan against target_url.
+        """Trigger an active scan against target_url and return its scan ID.
 
-        TODO (R008): call /JSON/ascan/action/scan/, return scan ID.
+        Scans recursively, i.e. every URL under target_url that the spider
+        discovered. Run the spider first so ZAP knows those URLs.
         """
-        raise NotImplementedError
+        body = self._request("ascan", "action", "scan", {"url": target_url, "recurse": "true"})
+        return self._read_field(body, "scan", "ascan/action/scan")
 
     def poll_active_scan(self, scan_id: str) -> int:
-        """Poll active scan progress. Returns percent complete (0-100).
+        """Return active scan progress for scan_id as a percentage (0-100)."""
+        body = self._request("ascan", "view", "status", {"scanId": scan_id})
+        return self._parse_progress(body, "ascan/view/status")
 
-        TODO (R008): call /JSON/ascan/view/status/
+    def run_active_scan(
+        self,
+        target_url: str,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        timeout: float = DEFAULT_ACTIVE_SCAN_TIMEOUT_SECONDS,
+        on_progress: ProgressCallback | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> str:
+        """Start an active scan against target_url and block until it completes.
+
+        Arguments behave as in run_spider(); the default timeout is longer
+        because active scans are much slower than crawls.
+
+        Returns:
+            The active scan ID.
         """
-        raise NotImplementedError
+        scan_id = self.start_active_scan(target_url)
+        self._wait_until_complete(
+            self.poll_active_scan,
+            scan_id,
+            "active scan",
+            poll_interval,
+            timeout,
+            on_progress,
+            sleep,
+            clock,
+        )
+        return scan_id
 
     def get_alerts(self, target_url: str) -> list[dict]:
         """Fetch raw alerts for target_url once scanning is complete.

@@ -1,6 +1,6 @@
 """Tests for the ZAP client wrapper, using a fake HTTP session (no live ZAP).
 
-Tickets: R006, R007
+Tickets: R006, R007, R008
 """
 
 import json
@@ -218,3 +218,72 @@ def test_run_spider_times_out():
 
 def test_timeout_error_is_a_zap_error():
     assert issubclass(ZapScanTimeoutError, ZapError)
+
+
+# --- R008: active scan -------------------------------------------------------
+
+
+def test_start_active_scan_sends_target_recursively_and_returns_scan_id():
+    session = FakeSession(make_response(body={"scan": "4"}))
+    scan_id = make_client(session).start_active_scan("http://localhost:3000")
+
+    assert scan_id == "4"
+    [call] = session.calls
+    assert call["url"] == "http://localhost:8080/JSON/ascan/action/scan/"
+    assert call["params"] == {"url": "http://localhost:3000", "recurse": "true"}
+
+
+def test_poll_active_scan_returns_percentage():
+    session = FakeSession(make_response(body={"status": "72"}))
+    assert make_client(session).poll_active_scan("4") == 72
+    assert session.calls[0]["url"].endswith("/JSON/ascan/view/status/")
+    assert session.calls[0]["params"] == {"scanId": "4"}
+
+
+def test_poll_active_scan_non_numeric_status_raises():
+    session = FakeSession(make_response(body={"status": "does_not_exist"}))
+    with pytest.raises(ZapError, match="ascan/view/status"):
+        make_client(session).poll_active_scan("4")
+
+
+def test_start_active_scan_zap_error_propagates():
+    """E.g. ZAP refuses to scan a URL it hasn't seen (spider not run first)."""
+    body = {"code": "url_not_found", "message": "URL Not Found in the Scan Tree"}
+    session = FakeSession(make_response(status=400, body=body))
+    with pytest.raises(ZapError, match="url_not_found"):
+        make_client(session).start_active_scan("http://localhost:3000")
+
+
+def test_run_active_scan_polls_until_complete_and_reports_progress():
+    session = FakeSession(
+        [
+            make_response(body={"scan": "4"}),
+            make_response(body={"status": "5"}),
+            make_response(body={"status": "50"}),
+            make_response(body={"status": "100"}),
+        ]
+    )
+    clock = FakeClock()
+    progress: list[int] = []
+
+    scan_id = make_client(session).run_active_scan(
+        "http://localhost:3000",
+        poll_interval=3,
+        on_progress=progress.append,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+
+    assert scan_id == "4"
+    assert progress == [5, 50, 100]
+    assert clock.sleeps == [3, 3]
+
+
+def test_run_active_scan_times_out():
+    session = FakeSession([make_response(body={"scan": "4"}), make_response(body={"status": "30"})])
+    clock = FakeClock()
+
+    with pytest.raises(ZapScanTimeoutError, match="active scan 4 did not finish within 10s"):
+        make_client(session).run_active_scan(
+            "http://localhost:3000", poll_interval=4, timeout=10, sleep=clock.sleep, clock=clock
+        )
