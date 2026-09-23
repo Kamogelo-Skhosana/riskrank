@@ -18,19 +18,22 @@ def list_scans():
     raise NotImplementedError
 
 
-@app.get("/scans/{scan_id}")
-def get_scan(scan_id: int):
-    """Get full findings detail for one scan.
-
-    TODO (R037): query findings for scan_id, return ranked list.
-    """
-    raise NotImplementedError
-
-
+# NOTE: /scans/trend must be registered before /scans/{scan_id}. FastAPI matches
+# routes in declaration order, so otherwise "trend" is parsed as a scan_id and
+# the request fails with a 422.
 @app.get("/scans/trend")
 def get_trend():
     """Get aggregated risk-over-time data across all scans.
 
     TODO (R038): aggregate scores per scan date for a trend chart.
+    """
+    raise NotImplementedError
+
+
+@app.get("/scans/{scan_id}")
+def get_scan(scan_id: int):
+    """Get full findings detail for one scan.
+
+    TODO (R037): query findings for scan_id, return ranked list.
     """
     raise NotImplementedError
