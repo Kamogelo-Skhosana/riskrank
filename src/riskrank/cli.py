@@ -3,15 +3,20 @@
 Usage:
     riskrank scan <url>
 
-Tickets: R015, R016
+Tickets: R015, R016, R017
 """
+
+from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 
 from riskrank.config import ConfigError, load_settings
 from riskrank.report.console import print_findings
+from riskrank.report.json_export import export_json
 from riskrank.scanner.models import Finding
 from riskrank.scanner.normalizer import normalize_alerts
 from riskrank.scanner.zap_client import ZapClient, ZapError
@@ -55,36 +60,50 @@ def run_scan(client: ZapClient, url: str) -> list[Finding]:
 
 @app.command()
 def scan(
-    url: str = typer.Argument(
-        ..., help="Target URL to scan. Must be a target you own or have permission to test."
-    ),
-    output: str = typer.Option(
-        None, "--output", help="Path to write raw findings as JSON (Phase 1)."
-    ),
-    report: str = typer.Option(
-        None, "--report", help="Path to write the prioritized Markdown report (Phase 2)."
-    ),
+    url: Annotated[
+        str,
+        typer.Argument(
+            help="Target URL to scan. Must be a target you own or have permission to test."
+        ),
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Also write the raw findings to this JSON file."),
+    ] = None,
+    report: Annotated[
+        str | None,
+        typer.Option(help="Path to write the prioritized Markdown report (Phase 2)."),
+    ] = None,
 ):
-    """Run a full scan against URL and print/save the results.
-
-    TODO (R017): write findings to --output as JSON
-    TODO (R018-R034): wire up triage -> ranking -> report generation (Phase 2)
-    """
-    console.print(f"[bold]riskrank[/bold] scanning {url}")
+    """Run a full scan against URL and print/save the results."""
+    # TODO (R018-R034): wire up triage -> ranking -> report generation (Phase 2)
+    console.print(f"[bold]riskrank[/bold] scanning {escape(url)}")
 
     try:
         client = ZapClient.from_settings(load_settings())
     except ConfigError as exc:
-        err_console.print(f"[red]Configuration error:[/red] {exc}")
+        err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_CONFIG_ERROR) from exc
 
     try:
         findings = run_scan(client, url)
     except ZapError as exc:
-        err_console.print(f"[red]Scan failed:[/red] {exc}")
+        err_console.print(f"[red]Scan failed:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_SCAN_FAILED) from exc
 
     print_findings(findings, console=console)
+
+    if output is not None:
+        try:
+            saved_to = export_json(findings, output, target_url=url)
+        except OSError as exc:
+            err_console.print(
+                f"[red]Could not write JSON output to {escape(str(output))}:[/red] {escape(str(exc))}"
+            )
+            raise typer.Exit(EXIT_SCAN_FAILED) from exc
+        console.print(
+            f"Saved {len(findings)} finding(s) to {escape(str(saved_to))}", soft_wrap=True
+        )
 
 
 if __name__ == "__main__":
