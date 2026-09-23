@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from riskrank.scanner.models import Finding
+from riskrank.scanner.models import Finding, severity_rank
 from riskrank.triage.context import TargetContext
 from riskrank.triage.llm_client import LLMClient
 from riskrank.triage.prompts import TRIAGE_PROMPT_TEMPLATE, TRIAGE_SYSTEM_PROMPT
@@ -155,11 +155,27 @@ def triage_finding(finding: Finding, context: TargetContext, llm: LLMClient) -> 
     raise TriageError(f"Could not triage {finding.id} ({finding.type}): {last_error}")
 
 
+def _ranking_key(finding: Finding) -> tuple[int, int, int, int]:
+    """Sort key for rank_findings(): smaller sorts first."""
+    score = finding.priority_score
+    return (
+        0 if score is not None else 1,  # triaged findings before untriaged ones
+        -(score or 0),  # higher combined score first
+        -(finding.exploitability_score or 0),  # tie-break: easier to exploit first
+        severity_rank(finding.severity_raw),  # then the scanner's own severity
+    )
+
+
 def rank_findings(findings: list[Finding]) -> list[Finding]:
     """Sort findings by combined priority score, highest risk first.
 
-    TODO (R026): combine exploitability_score and business_impact_score
-    into a single sortable priority score.
+    The combined score is exploitability x business impact (see
+    Finding.priority_score). Ties are broken by exploitability, then by the
+    scanner's severity label; anything still tied keeps its original order
+    (the sort is stable). Findings that haven't been triaged yet (no scores)
+    go last, ordered by scanner severity. Returns a new list; the input is
+    not modified.
+
     TODO (R027): ensure priority_tier is consistent with the combined score.
     """
-    raise NotImplementedError
+    return sorted(findings, key=_ranking_key)

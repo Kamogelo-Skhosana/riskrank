@@ -21,6 +21,7 @@ from riskrank.triage.triage import (
     TriageError,
     build_triage_prompt,
     parse_triage_response,
+    rank_findings,
     triage_finding,
 )
 
@@ -360,11 +361,51 @@ def test_real_llm_client_cannot_reach_the_api_in_tests(sample_finding, login_con
         triage_finding(sample_finding, login_context, llm)
 
 
-# --- R026-R028 (placeholder) ------------------------------------------------------------
+# --- R026: combined score + ranking ------------------------------------------------
 
 
-def test_rank_findings_placeholder():
-    """TODO (R028): build a list of Findings with varying scores and
-    assert rank_findings() sorts them highest-risk first.
-    """
-    assert True
+def scored(fid: str, exploit: int | None, impact: int | None, severity: str = "Medium"):
+    return Finding(
+        id=fid,
+        type="T",
+        severity_raw=severity,
+        endpoint="/",
+        exploitability_score=exploit,
+        business_impact_score=impact,
+    )
+
+
+@pytest.mark.parametrize(
+    ("exploit", "impact", "expected"),
+    [(10, 10, 100), (1, 1, 1), (9, 8, 72), (10, 1, 10), (5, 5, 25)],
+)
+def test_priority_score_is_exploitability_times_impact(exploit, impact, expected):
+    assert scored("f", exploit, impact).priority_score == expected
+
+
+@pytest.mark.parametrize(("exploit", "impact"), [(None, None), (7, None), (None, 7)])
+def test_priority_score_is_none_until_both_scores_are_set(exploit, impact):
+    assert scored("f", exploit, impact).priority_score is None
+
+
+def test_priority_score_is_included_in_json_dump():
+    assert scored("f", 3, 4).model_dump()["priority_score"] == 12
+
+
+def test_rank_findings_sorts_highest_combined_score_first():
+    # scores: a=6, b=81, c=25, d=10
+    findings = [scored("a", 2, 3), scored("b", 9, 9), scored("c", 5, 5), scored("d", 10, 1)]
+    assert [f.id for f in rank_findings(findings)] == ["b", "c", "d", "a"]
+
+
+def test_rank_findings_does_not_modify_input():
+    findings = [scored("a", 1, 1), scored("b", 9, 9)]
+    rank_findings(findings)
+    assert [f.id for f in findings] == ["a", "b"]
+
+
+def test_rank_findings_empty():
+    assert rank_findings([]) == []
+
+
+# R028 adds the full set of edge cases (ties, missing scores, conflicting signals).

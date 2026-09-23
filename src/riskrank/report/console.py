@@ -9,10 +9,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from riskrank.scanner.models import Finding
+from riskrank.scanner.models import SEVERITY_ORDER, Finding, severity_rank
 
-# ZAP's severity levels, most to least severe.
-SEVERITY_ORDER = ["High", "Medium", "Low", "Informational"]
 SEVERITY_STYLES = {
     "High": "bold red",
     "Medium": "yellow",
@@ -23,10 +21,7 @@ SEVERITY_STYLES = {
 
 def _severity_rank(finding: Finding) -> int:
     """Sort key: known severities in order, anything unexpected last."""
-    try:
-        return SEVERITY_ORDER.index(finding.severity_raw)
-    except ValueError:
-        return len(SEVERITY_ORDER)
+    return severity_rank(finding.severity_raw)
 
 
 def severity_summary(findings: list[Finding]) -> str:
