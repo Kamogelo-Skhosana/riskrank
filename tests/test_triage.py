@@ -1,9 +1,10 @@
 """Tests for the triage layer, using a mocked LLM client.
 
-Tickets: R021-R028
+Tickets: R021-R028 (R028: ranking edge cases at the end of this file)
 """
 
 import json
+import random
 import socket
 from pathlib import Path
 from types import SimpleNamespace
@@ -505,4 +506,137 @@ def test_rank_findings_makes_tiers_consistent_with_scores():
     ]
 
 
-# R028 adds the full set of ranking edge cases (ties, missing scores, conflicting signals).
+# --- R028: ranking edge cases ------------------------------------------------------------
+
+
+def ids(findings):
+    return [f.id for f in findings]
+
+
+class TestTies:
+    def test_equal_score_easier_to_exploit_ranks_first(self):
+        # Both 36; "b" is easier to exploit (9 vs 4).
+        ranked = rank_findings([scored("a", 4, 9), scored("b", 9, 4)])
+        assert ids(ranked) == ["b", "a"]
+
+    def test_equal_score_and_exploitability_falls_back_to_scanner_severity(self):
+        findings = [
+            scored("info", 6, 6, "Informational"),
+            scored("low", 6, 6, "Low"),
+            scored("high", 6, 6, "High"),
+            scored("medium", 6, 6, "Medium"),
+        ]
+        assert ids(rank_findings(findings)) == ["high", "medium", "low", "info"]
+
+    def test_complete_ties_keep_original_order(self):
+        findings = [scored(f"f{i}", 5, 5, "Medium") for i in range(6)]
+        assert ids(rank_findings(findings)) == [f"f{i}" for i in range(6)]
+
+    def test_unknown_scanner_severity_loses_tie_break(self):
+        ranked = rank_findings([scored("odd", 5, 5, "Weird"), scored("low", 5, 5, "Low")])
+        assert ids(ranked) == ["low", "odd"]
+
+
+class TestMissingScores:
+    @pytest.mark.parametrize(("exploit", "impact"), [(None, None), (9, None), (None, 9)])
+    def test_untriaged_or_partially_scored_findings_rank_last(self, exploit, impact):
+        ranked = rank_findings([scored("partial", exploit, impact, "High"), scored("low", 1, 1)])
+        assert ids(ranked) == ["low", "partial"]
+
+    def test_partially_scored_finding_gets_no_tier(self):
+        [ranked] = rank_findings([scored("partial", 9, None)])
+        assert ranked.priority_score is None
+        assert ranked.priority_tier is None
+
+    def test_untriaged_findings_are_ordered_by_scanner_severity(self):
+        findings = [
+            scored("low", None, None, "Low"),
+            scored("high", None, None, "High"),
+            scored("info", None, None, "Informational"),
+            scored("medium", None, None, "Medium"),
+        ]
+        assert ids(rank_findings(findings)) == ["high", "medium", "low", "info"]
+
+    def test_mixed_list_triaged_block_then_untriaged_block(self):
+        findings = [
+            scored("u-high", None, None, "High"),
+            scored("t-low", 2, 2),
+            scored("u-low", None, None, "Low"),
+            scored("t-high", 9, 9),
+        ]
+        assert ids(rank_findings(findings)) == ["t-high", "t-low", "u-high", "u-low"]
+
+
+class TestConflictingSignals:
+    def test_ai_score_beats_scanner_severity(self):
+        """Scanner says High but in context it's minor; scanner says Low but it's serious."""
+        findings = [
+            scored("scanner-high", 2, 2, "High"),
+            scored("scanner-low", 8, 9, "Low"),
+        ]
+        ranked = rank_findings(findings)
+        assert ids(ranked) == ["scanner-low", "scanner-high"]
+        assert [f.priority_tier for f in ranked] == ["Critical", "Low"]
+
+    def test_informational_finding_can_be_critical(self):
+        ranked = rank_findings(
+            [scored("info", 10, 10, "Informational"), scored("high", 5, 5, "High")]
+        )
+        assert ids(ranked) == ["info", "high"]
+
+    def test_easy_but_harmless_ranks_below_moderate(self):
+        # 10x1 = 10 (Low) vs 5x6 = 30 (Medium): multiplying keeps harmless issues down.
+        ranked = rank_findings([scored("harmless", 10, 1), scored("moderate", 5, 6)])
+        assert ids(ranked) == ["moderate", "harmless"]
+        assert [f.priority_tier for f in ranked] == ["Medium", "Low"]
+
+    def test_stale_tier_from_llm_is_corrected(self):
+        ranked = rank_findings([scored("f", 1, 1).model_copy(update={"priority_tier": "Critical"})])
+        assert ranked[0].priority_tier == "Low"
+
+
+class TestGeneralProperties:
+    def test_extreme_scores(self):
+        ranked = rank_findings([scored("min", 1, 1), scored("max", 10, 10)])
+        assert [(f.id, f.priority_score, f.priority_tier) for f in ranked] == [
+            ("max", 100, "Critical"),
+            ("min", 1, "Low"),
+        ]
+
+    def test_single_finding(self):
+        assert ids(rank_findings([scored("only", 3, 3)])) == ["only"]
+
+    def test_duplicate_ids_are_all_kept(self):
+        assert ids(rank_findings([scored("dup", 1, 1), scored("dup", 9, 9)])) == ["dup", "dup"]
+
+    def test_ranking_is_idempotent(self):
+        findings = [scored(f"f{i}", (i * 7) % 10 + 1, (i * 3) % 10 + 1) for i in range(20)]
+        once = rank_findings(findings)
+        assert rank_findings(once) == once
+
+    def test_random_lists_are_correctly_ordered(self):
+        rng = random.Random(1234)  # fixed seed: deterministic in CI
+        severities = ["High", "Medium", "Low", "Informational"]
+        for _ in range(200):
+            findings = [
+                scored(
+                    f"f{i}",
+                    rng.choice([None, *range(1, 11)]),
+                    rng.choice([None, *range(1, 11)]),
+                    rng.choice(severities),
+                )
+                for i in range(rng.randint(0, 25))
+            ]
+            ranked = rank_findings(findings)
+
+            assert sorted(ids(ranked)) == sorted(ids(findings))  # nothing lost or added
+            scores = [f.priority_score for f in ranked]
+            triaged = [s for s in scores if s is not None]
+            # All triaged findings come first...
+            assert scores[: len(triaged)] == triaged
+            # ...in non-increasing score order...
+            assert triaged == sorted(triaged, reverse=True)
+            # ...and every tier matches its score.
+            for f in ranked:
+                expected = tier_for_score(f.priority_score) if f.priority_score else None
+                assert f.priority_tier == expected
