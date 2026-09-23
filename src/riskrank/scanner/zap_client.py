@@ -35,6 +35,10 @@ DEFAULT_SPIDER_TIMEOUT_SECONDS = 10 * 60
 DEFAULT_ACTIVE_SCAN_TIMEOUT_SECONDS = 60 * 60
 # Alerts are fetched in pages so a large scan doesn't produce one huge response.
 DEFAULT_ALERTS_PAGE_SIZE = 500
+# While a scan runs, ZAP can be too busy to answer status checks for a while
+# (seen on Juice Shop active scans). Keep waiting through that, but give up if
+# ZAP stays unresponsive this long.
+DEFAULT_UNRESPONSIVE_TIMEOUT_SECONDS = 5 * 60
 
 ProgressCallback = Callable[[int], None]
 
@@ -94,6 +98,21 @@ class ZapClient:
             return isinstance(exc, (requests.ConnectionError, requests.Timeout))
         return isinstance(exc, requests.ConnectionError)  # includes ConnectTimeout
 
+    def _connection_error_message(self, exc: Exception, attempts: int) -> str:
+        """Explain a connection failure, distinguishing 'down' from 'too busy'."""
+        detail = f"({type(exc).__name__} after {attempts} attempt(s))"
+        if isinstance(exc, requests.ReadTimeout):
+            # Connected fine, but ZAP didn't answer in time: it's running but busy.
+            return (
+                f"ZAP at {self.api_url} is running but did not respond within "
+                f"{self.timeout:.0f}s {detail}. It may be overloaded by a running scan; "
+                "try giving Docker more CPU/memory."
+            )
+        return (
+            f"Could not reach ZAP at {self.api_url} {detail}. Is ZAP running? "
+            "See docs/ARCHITECTURE.md for how to start it with Docker."
+        )
+
     def _send(self, url: str, params: dict[str, Any], kind: str, endpoint: str):
         """GET url, retrying transient failures with exponential backoff."""
         attempts = self.max_retries + 1
@@ -103,11 +122,7 @@ class ZapClient:
                 response = self.session.get(url, params=params, timeout=self.timeout)
             except (requests.ConnectionError, requests.Timeout) as exc:
                 if attempt == attempts or not self._is_retryable_error(exc, kind):
-                    raise ZapConnectionError(
-                        f"Could not reach ZAP at {self.api_url} "
-                        f"({type(exc).__name__} after {attempt} attempt(s)). Is ZAP running? "
-                        "See docs/ARCHITECTURE.md for how to start it with Docker."
-                    ) from exc
+                    raise ZapConnectionError(self._connection_error_message(exc, attempt)) from exc
                 reason = type(exc).__name__
             else:
                 if response.status_code not in RETRYABLE_STATUS_CODES or attempt == attempts:
@@ -208,15 +223,44 @@ class ZapClient:
         on_progress: ProgressCallback | None,
         sleep: Callable[[float], None],
         clock: Callable[[], float],
+        unresponsive_timeout: float = DEFAULT_UNRESPONSIVE_TIMEOUT_SECONDS,
     ) -> None:
-        """Call poll(scan_id) until it reports 100%, or raise on timeout."""
+        """Call poll(scan_id) until it reports 100%, or raise on timeout.
+
+        A status check that fails to reach ZAP doesn't abort the scan: ZAP is
+        often too busy to answer while it attacks the target. Polling carries
+        on until ZAP has been unresponsive for unresponsive_timeout seconds,
+        then raises ZapConnectionError. Any other ZapError is raised at once.
+        """
         deadline = clock() + timeout
+        unresponsive_since: float | None = None
+        progress = 0
         while True:
-            progress = poll(scan_id)
-            if on_progress:
-                on_progress(progress)
-            if progress >= 100:
-                return
+            try:
+                progress = poll(scan_id)
+            except ZapConnectionError:
+                now = clock()
+                if unresponsive_since is None:
+                    unresponsive_since = now
+                if now - unresponsive_since >= unresponsive_timeout:
+                    raise ZapConnectionError(
+                        f"ZAP stopped responding during {label} {scan_id} and has not "
+                        f"answered for {now - unresponsive_since:.0f}s "
+                        f"(last progress: {progress}%)."
+                    ) from None
+                logger.warning(
+                    "ZAP is not answering %s status checks (probably busy scanning); "
+                    "still waiting (last progress: %d%%)",
+                    label,
+                    progress,
+                )
+            else:
+                unresponsive_since = None
+                if on_progress:
+                    on_progress(progress)
+                if progress >= 100:
+                    return
+
             if clock() >= deadline:
                 raise ZapScanTimeoutError(
                     f"ZAP {label} {scan_id} did not finish within {timeout:.0f}s "
@@ -240,6 +284,7 @@ class ZapClient:
         poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
         timeout: float = DEFAULT_SPIDER_TIMEOUT_SECONDS,
         on_progress: ProgressCallback | None = None,
+        unresponsive_timeout: float = DEFAULT_UNRESPONSIVE_TIMEOUT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> str:
@@ -251,6 +296,8 @@ class ZapClient:
             timeout: give up (ZapScanTimeoutError) after this many seconds.
             on_progress: optional callback receiving each progress percentage,
                 e.g. to drive a CLI progress display.
+            unresponsive_timeout: keep waiting through failed status checks
+                (ZAP busy) for up to this many seconds before giving up.
             sleep, clock: injectable for tests.
 
         Returns:
@@ -258,7 +305,15 @@ class ZapClient:
         """
         scan_id = self.start_spider(target_url)
         self._wait_until_complete(
-            self.poll_spider, scan_id, "spider", poll_interval, timeout, on_progress, sleep, clock
+            self.poll_spider,
+            scan_id,
+            "spider",
+            poll_interval,
+            timeout,
+            on_progress,
+            sleep,
+            clock,
+            unresponsive_timeout,
         )
         return scan_id
 
@@ -282,6 +337,7 @@ class ZapClient:
         poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
         timeout: float = DEFAULT_ACTIVE_SCAN_TIMEOUT_SECONDS,
         on_progress: ProgressCallback | None = None,
+        unresponsive_timeout: float = DEFAULT_UNRESPONSIVE_TIMEOUT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> str:
@@ -303,6 +359,7 @@ class ZapClient:
             on_progress,
             sleep,
             clock,
+            unresponsive_timeout,
         )
         return scan_id
 

@@ -409,7 +409,7 @@ def test_retryable_status_then_success(status):
 def test_gives_up_after_max_retries_on_connection_error():
     session = FakeSession(exc=requests.ConnectionError("refused"))
     sleep = RecordingSleep()
-    with pytest.raises(ZapConnectionError, match="after 4 attempt"):
+    with pytest.raises(ZapConnectionError, match="after 4 attempt.*Is ZAP running"):
         make_client(session, sleep=sleep, max_retries=3).get_version()
     assert len(session.calls) == 4
     assert sleep.delays == [1.0, 2.0, 4.0]
@@ -462,3 +462,99 @@ def test_retry_logs_warning(caplog):
     with caplog.at_level("WARNING", logger="riskrank.scanner.zap_client"):
         make_client(session).get_version()
     assert "core/view/version failed (ConnectionError), retrying in 1.0s" in caplog.text
+
+
+# --- Busy ZAP during scans -----------------------------------------------------
+
+
+def test_read_timeout_message_says_zap_is_busy_not_down():
+    session = FakeSession(exc=requests.ReadTimeout("slow"))
+    with pytest.raises(ZapConnectionError) as exc:
+        make_client(session, max_retries=0).get_version()
+    message = str(exc.value)
+    assert "is running but did not respond within 5s" in message
+    assert "Is ZAP running?" not in message
+
+
+def test_scan_keeps_waiting_while_zap_is_too_busy_to_answer(caplog):
+    """Regression: a Juice Shop active scan died at 34% because status checks
+    timed out while ZAP was busy. Polling must ride that out."""
+    busy = requests.ReadTimeout("busy")
+    session = FakeSession(
+        [
+            make_response(body={"scan": "4"}),
+            make_response(body={"status": "34"}),
+            busy,  # one poll = 1 try + 3 retries, all timing out
+            busy,
+            busy,
+            busy,
+            make_response(body={"status": "80"}),
+            make_response(body={"status": "100"}),
+        ]
+    )
+    clock = FakeClock()
+    progress: list[int] = []
+
+    with caplog.at_level("WARNING", logger="riskrank.scanner.zap_client"):
+        scan_id = make_client(session).run_active_scan(
+            "http://localhost:3000",
+            poll_interval=2,
+            on_progress=progress.append,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+
+    assert scan_id == "4"
+    assert progress == [34, 80, 100]
+    assert "still waiting (last progress: 34%)" in caplog.text
+
+
+def test_scan_gives_up_when_zap_stays_unresponsive():
+    session = FakeSession(
+        [
+            make_response(body={"scan": "4"}),
+            make_response(body={"status": "34"}),
+            requests.ReadTimeout("busy"),  # repeated for every later call
+        ]
+    )
+    clock = FakeClock()
+
+    with pytest.raises(ZapConnectionError, match="stopped responding during active scan 4"):
+        make_client(session).run_active_scan(
+            "http://localhost:3000",
+            poll_interval=10,
+            unresponsive_timeout=60,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+    assert clock.now >= 60
+
+
+def test_unresponsive_timer_resets_after_a_successful_poll():
+    busy = requests.ReadTimeout("busy")
+    # Each busy poll consumes 4 calls (1 try + 3 retries).
+    responses = [make_response(body={"scan": "4"})]
+    for status in ("10", "20", "30"):
+        responses += [busy] * 4 * 3  # 3 failed polls = 30s unresponsive
+        responses.append(make_response(body={"status": status}))
+    responses.append(make_response(body={"status": "100"}))
+    clock = FakeClock()
+
+    scan_id = make_client(FakeSession(responses)).run_active_scan(
+        "http://localhost:3000",
+        poll_interval=10,
+        unresponsive_timeout=35,  # never exceeded, because it resets each time
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert scan_id == "4"
+
+
+def test_non_connection_error_during_poll_still_fails_immediately():
+    body = {"code": "does_not_exist", "message": "scan gone"}
+    session = FakeSession([make_response(body={"scan": "4"}), make_response(status=400, body=body)])
+    clock = FakeClock()
+    with pytest.raises(ZapError, match="does_not_exist"):
+        make_client(session).run_active_scan(
+            "http://localhost:3000", sleep=clock.sleep, clock=clock
+        )
