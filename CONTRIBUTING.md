@@ -2,6 +2,18 @@
 
 This is a personal portfolio project, built ticket-by-ticket across three phases. See [docs/ROADMAP.md](docs/ROADMAP.md) for the phase overview and [docs/TICKETS.md](docs/TICKETS.md) for the full list of 50 tickets.
 
+## One-time setup
+
+Install the dev tools and the git pre-commit hook, which runs ruff and black
+automatically on every commit:
+
+```bash
+pip install -r requirements-dev.txt
+pre-commit install
+```
+
+To run the hooks against the whole repo manually: `pre-commit run --all-files`.
+
 ## Workflow
 
 1. Pick the next open ticket from `docs/TICKETS.md` (work roughly in order within a phase — later tickets often depend on earlier ones).
