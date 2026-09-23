@@ -19,9 +19,11 @@ from riskrank.triage.prompts import TRIAGE_SYSTEM_PROMPT
 from riskrank.triage.triage import (
     MAX_FIELD_CHARS,
     TriageError,
+    assign_priority_tier,
     build_triage_prompt,
     parse_triage_response,
     rank_findings,
+    tier_for_score,
     triage_finding,
 )
 
@@ -408,4 +410,99 @@ def test_rank_findings_empty():
     assert rank_findings([]) == []
 
 
-# R028 adds the full set of edge cases (ties, missing scores, conflicting signals).
+# --- R027: priority tier assignment ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("score", "tier"),
+    [
+        (100, "Critical"),
+        (64, "Critical"),
+        (63, "High"),
+        (36, "High"),
+        (35, "Medium"),
+        (16, "Medium"),
+        (15, "Low"),
+        (1, "Low"),
+    ],
+)
+def test_tier_for_score_boundaries(score, tier):
+    assert tier_for_score(score) == tier
+
+
+@pytest.mark.parametrize("score", [0, 101, -5])
+def test_tier_for_score_rejects_out_of_range(score):
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        tier_for_score(score)
+
+
+def test_assign_priority_tier_derives_tier_from_score():
+    finding = scored("f", 8, 8).model_copy(update={"priority_tier": "Low"})
+    assert assign_priority_tier(finding).priority_tier == "Critical"
+    assert finding.priority_tier == "Low"  # original untouched
+
+
+def test_assign_priority_tier_returns_same_object_when_already_consistent():
+    finding = scored("f", 8, 8).model_copy(update={"priority_tier": "Critical"})
+    assert assign_priority_tier(finding) is finding
+
+
+def test_assign_priority_tier_leaves_untriaged_findings_alone():
+    finding = scored("f", None, None)
+    assert assign_priority_tier(finding) is finding
+    assert finding.priority_tier is None
+
+
+def test_triage_finding_uses_score_derived_tier(sample_finding, login_context):
+    """LLM says High but scores 8x9=72 -> Critical."""
+    llm = FakeLLM(
+        json.dumps(
+            {
+                **VALID_REPLY,
+                "exploitability_score": 8,
+                "business_impact_score": 9,
+                "priority_tier": "High",
+            }
+        )
+    )
+    assert triage_finding(sample_finding, login_context, llm).priority_tier == "Critical"
+
+
+def test_triage_finding_warns_when_llm_tier_is_far_off(sample_finding, login_context, caplog):
+    reply = {
+        **VALID_REPLY,
+        "exploitability_score": 9,
+        "business_impact_score": 9,
+        "priority_tier": "Low",
+    }
+    with caplog.at_level("WARNING", logger="riskrank.triage.triage"):
+        triaged = triage_finding(sample_finding, login_context, FakeLLM(json.dumps(reply)))
+    assert triaged.priority_tier == "Critical"
+    assert "LLM tier for finding-001 (Low) disagrees with its scores (9x9 -> Critical)" in (
+        caplog.text
+    )
+
+
+def test_triage_finding_no_warning_for_one_level_difference(sample_finding, login_context, caplog):
+    reply = {
+        **VALID_REPLY,
+        "exploitability_score": 8,
+        "business_impact_score": 9,
+        "priority_tier": "High",
+    }
+    with caplog.at_level("WARNING", logger="riskrank.triage.triage"):
+        triage_finding(sample_finding, login_context, FakeLLM(json.dumps(reply)))
+    assert "disagrees" not in caplog.text
+
+
+def test_rank_findings_makes_tiers_consistent_with_scores():
+    stale = scored("a", 9, 9).model_copy(update={"priority_tier": "Low"})
+    ranked = rank_findings([scored("b", 2, 2), stale, scored("c", None, None)])
+    assert [(f.id, f.priority_tier) for f in ranked] == [
+        ("a", "Critical"),
+        ("b", "Low"),
+        ("c", None),
+    ]
+
+
+# R028 adds the full set of ranking edge cases (ties, missing scores, conflicting signals).

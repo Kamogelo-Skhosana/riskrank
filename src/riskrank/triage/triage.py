@@ -25,6 +25,17 @@ MAX_FIELD_CHARS = 1500
 MAX_PARSE_RETRIES = 1
 
 PriorityTier = Literal["Critical", "High", "Medium", "Low"]
+TIER_ORDER: list[PriorityTier] = ["Critical", "High", "Medium", "Low"]
+
+# Minimum combined score (exploitability x impact, 1-100) for each tier.
+# The thresholds are squares, so a finding scoring evenly on both axes lands
+# where you'd expect: 8x8 = 64 is Critical, 6x6 = 36 High, 4x4 = 16 Medium.
+TIER_THRESHOLDS: list[tuple[PriorityTier, int]] = [
+    ("Critical", 64),
+    ("High", 36),
+    ("Medium", 16),
+    ("Low", 1),
+]
 
 
 class TriageError(Exception):
@@ -117,6 +128,34 @@ def parse_triage_response(text: str) -> TriageResult:
         raise TriageError(f"LLM reply failed validation: {problems}") from exc
 
 
+def tier_for_score(score: int) -> PriorityTier:
+    """Map a combined priority score (1-100) to a priority tier.
+
+    Critical >= 64, High >= 36, Medium >= 16, otherwise Low.
+    """
+    if not 1 <= score <= 100:
+        raise ValueError(f"priority score must be between 1 and 100, got {score}")
+    for tier, minimum in TIER_THRESHOLDS:
+        if score >= minimum:
+            return tier
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def assign_priority_tier(finding: Finding) -> Finding:
+    """Return a copy of finding with priority_tier derived from its score.
+
+    Untriaged findings (no priority_score) come back unchanged, so their
+    tier stays None.
+    """
+    score = finding.priority_score
+    if score is None:
+        return finding
+    tier = tier_for_score(score)
+    if tier == finding.priority_tier:
+        return finding
+    return finding.model_copy(update={"priority_tier": tier})
+
+
 def triage_finding(finding: Finding, context: TargetContext, llm: LLMClient) -> Finding:
     """Score a single finding using the LLM and return an updated Finding.
 
@@ -124,6 +163,11 @@ def triage_finding(finding: Finding, context: TargetContext, llm: LLMClient) -> 
     exploitability_score, business_impact_score, priority_tier,
     ai_explanation and suggested_fix filled in. If the reply can't be
     parsed, the LLM is asked again (up to MAX_PARSE_RETRIES times).
+
+    The tier is derived from the scores (tier_for_score), not taken from
+    the LLM, so tiers are always consistent with the ranking. If the LLM's
+    own tier is two or more levels away, a warning is logged, since that
+    usually means its scores and its judgement don't agree.
 
     Raises:
         TriageError: if no usable reply was obtained.
@@ -142,11 +186,23 @@ def triage_finding(finding: Finding, context: TargetContext, llm: LLMClient) -> 
                 "Could not parse triage reply for %s (attempt %d): %s", finding.id, attempt, exc
             )
             continue
+        tier = tier_for_score(result.exploitability_score * result.business_impact_score)
+        gap = abs(TIER_ORDER.index(tier) - TIER_ORDER.index(result.priority_tier))
+        if gap >= 2:
+            logger.warning(
+                "LLM tier for %s (%s) disagrees with its scores (%dx%d -> %s); using %s",
+                finding.id,
+                result.priority_tier,
+                result.exploitability_score,
+                result.business_impact_score,
+                tier,
+                tier,
+            )
         return finding.model_copy(
             update={
                 "exploitability_score": result.exploitability_score,
                 "business_impact_score": result.business_impact_score,
-                "priority_tier": result.priority_tier,
+                "priority_tier": tier,
                 "ai_explanation": result.explanation,
                 "suggested_fix": result.suggested_fix,
             }
@@ -176,6 +232,8 @@ def rank_findings(findings: list[Finding]) -> list[Finding]:
     go last, ordered by scanner severity. Returns a new list; the input is
     not modified.
 
-    TODO (R027): ensure priority_tier is consistent with the combined score.
+    Every triaged finding's priority_tier is (re)derived from its score, so
+    the tiers in the output always agree with the ranking, even if scores
+    were edited after triage.
     """
-    return sorted(findings, key=_ranking_key)
+    return sorted((assign_priority_tier(f) for f in findings), key=_ranking_key)
