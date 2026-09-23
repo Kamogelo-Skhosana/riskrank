@@ -1,0 +1,5 @@
+Here is my assessment of this finding:
+
+{"exploitability_score": 3, "business_impact_score": 2, "priority_tier": "low", "explanation": "A missing X-Content-Type-Options header on a static page is a hardening gap rather than an exploitable flaw on its own.", "suggested_fix": "Send 'X-Content-Type-Options: nosniff' on all responses."}
+
+Let me know if you need anything else.

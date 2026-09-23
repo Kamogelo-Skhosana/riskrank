@@ -1,0 +1,9 @@
+```json
+{
+  "exploitability_score": 6,
+  "business_impact_score": 5,
+  "priority_tier": "Medium",
+  "explanation": "Reflected XSS on the search page could let an attacker run script in a victim's browser via a crafted link. The page doesn't handle credentials directly, which limits the impact.",
+  "suggested_fix": "HTML-encode the search term when rendering it and add a Content-Security-Policy header."
+}
+```

@@ -1,0 +1,2 @@
+Assessment for endpoint {id}: see below.
+{"exploitability_score": 8, "business_impact_score": 7, "priority_tier": "High", "explanation": "The response leaks a stack trace like {\"error\": \"SequelizeDatabaseError\"}, which confirms the SQL backend and helps an attacker craft injections.", "suggested_fix": "Return generic error messages and log details server-side only."}

@@ -1,0 +1,1 @@
+{"exploitability_score": 8, "business_impact_score": 7, "priority_tier": "High", "explanation": "The endpoint exposes

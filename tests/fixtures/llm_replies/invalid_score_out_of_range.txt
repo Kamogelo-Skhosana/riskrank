@@ -1,0 +1,1 @@
+{"exploitability_score": 15, "business_impact_score": 8, "priority_tier": "Critical", "explanation": "Very bad.", "suggested_fix": "Fix it."}

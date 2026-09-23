@@ -1,0 +1,1 @@
+{"exploitability_score": 9, "business_impact_score": 9, "priority_tier": "Critical", "explanation": "The login endpoint is public and its SQL query can be manipulated, letting an attacker bypass authentication or dump user data.", "suggested_fix": "Use parameterised queries or an ORM for all database access on this route."}

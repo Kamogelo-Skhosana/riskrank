@@ -1,7 +1,7 @@
 """Core triage logic — scores each Finding via the LLM and assigns
 a priority tier.
 
-Tickets: R023, R024, R026, R027
+Tickets: R023, R024, R025, R026, R027
 """
 
 import json
@@ -52,10 +52,16 @@ class TriageResult(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-def _truncate(text: str | None, limit: int = MAX_FIELD_CHARS) -> str:
+def _untrusted(text: str | None, limit: int = MAX_FIELD_CHARS) -> str:
+    """Prepare scanner text for the prompt: truncate it, and neutralise any
+    <scanner_data> tags inside it so it can't close the wrapper early and
+    smuggle instructions outside the untrusted-data block."""
     if not text:
         return "(none)"
-    return text if len(text) <= limit else text[:limit] + " …[truncated]"
+    text = text if len(text) <= limit else text[:limit] + " …[truncated]"
+    return text.replace("<scanner_data>", "<scanner-data>").replace(
+        "</scanner_data>", "</scanner-data>"
+    )
 
 
 def build_triage_prompt(finding: Finding, context: TargetContext) -> str:
@@ -65,8 +71,8 @@ def build_triage_prompt(finding: Finding, context: TargetContext) -> str:
         severity_raw=finding.severity_raw,
         cwe=f"CWE-{finding.cwe_id}" if finding.cwe_id else "unknown",
         endpoint=finding.endpoint,
-        evidence=_truncate(finding.evidence),
-        description=_truncate(finding.description),
+        evidence=_untrusted(finding.evidence),
+        description=_untrusted(finding.description),
         public_facing="yes" if context.public_facing else "no",
         handles_sensitive_data="yes" if context.handles_sensitive_data else "no",
         requires_auth="yes" if context.requires_auth else "no",
