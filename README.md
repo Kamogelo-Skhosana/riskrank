@@ -2,7 +2,7 @@
 
 **AI-powered vulnerability scanner and prioritizer.** riskrank wraps an established security scanner (OWASP ZAP), then uses an LLM to triage the raw findings by real-world exploitability and business impact — turning a wall of low-value alerts into a short, prioritized "fix this first" list.
 
-> Personal portfolio project — Cybersecurity Testing track.
+> Cybersecurity Testing track.
 
 ---
 
@@ -39,23 +39,31 @@ riskrank is built in three phases, each ending in something tangible and demoabl
 
 ## Quick Start
 
+**Requires Python 3.11+** (check with `python --version`).
+
 ```bash
 # Clone
-git clone https://github.com/<your-username>/riskrank.git
+git clone https://github.com/Kamogelo-Skhosana/riskrank.git
 cd riskrank
 
-# Set up environment
+# Create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+source .venv/bin/activate        # macOS / Linux
+# .venv\Scripts\activate         # Windows (PowerShell / cmd)
+
+# Install riskrank (editable) plus dev tools
+pip install -r requirements.txt -r requirements-dev.txt
+pip install -e .
 
 # Configure
 cp .env.example .env
 # edit .env with your ZAP instance details and LLM API key
 
 # Run a scan (Phase 1+)
-python -m riskrank.cli scan https://example-target.com
+riskrank scan https://example-target.com
 ```
+
+`pip install -e .` installs the `riskrank` command and makes the `src/` package importable. Without it, `python -m riskrank.cli` fails with `ModuleNotFoundError` unless you set `PYTHONPATH=src`.
 
 Full setup instructions (including running OWASP ZAP locally via Docker) are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
