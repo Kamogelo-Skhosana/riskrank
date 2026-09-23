@@ -11,6 +11,7 @@ string, so it doesn't end up in logs.
 Tickets: R006, R007, R008, R009, R010
 """
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -19,7 +20,14 @@ import requests
 
 from riskrank.config import Settings
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_TIMEOUT_SECONDS = 30.0
+# Retries for transient failures: waits of 1s, 2s, 4s between attempts.
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF_SECONDS = 1.0
+# Gateway/overload statuses that are usually temporary (e.g. ZAP still starting).
+RETRYABLE_STATUS_CODES = frozenset({502, 503, 504})
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_SPIDER_TIMEOUT_SECONDS = 10 * 60
 # Active scans send attack payloads to every discovered URL, so they take far
@@ -52,10 +60,18 @@ class ZapClient:
         api_key: str,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         session: requests.Session | None = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_seconds: float = DEFAULT_BACKOFF_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
     ):
+        if max_retries < 0:
+            raise ValueError("max_retries must be 0 or more")
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.backoff_seconds = backoff_seconds
+        self._sleep = sleep
         self.session = session or requests.Session()
         self.session.headers.update({"X-ZAP-API-Key": api_key, "Accept": "application/json"})
 
@@ -65,10 +81,60 @@ class ZapClient:
         settings.require("zap_api_key")
         return cls(api_url=settings.zap_api_url, api_key=settings.zap_api_key)
 
+    def _is_retryable_error(self, exc: requests.RequestException, kind: str) -> bool:
+        """Decide whether a failed request is safe to retry.
+
+        Views are read-only, so any connection error or timeout is retried.
+        Actions (start a spider/scan) are only retried when the request
+        can't have reached ZAP (connection refused / connect timeout). A read
+        timeout on an action is NOT retried: ZAP may already have started
+        the scan, and retrying would launch a duplicate.
+        """
+        if kind == "view":
+            return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+        return isinstance(exc, requests.ConnectionError)  # includes ConnectTimeout
+
+    def _send(self, url: str, params: dict[str, Any], kind: str, endpoint: str):
+        """GET url, retrying transient failures with exponential backoff."""
+        attempts = self.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            reason: str
+            try:
+                response = self.session.get(url, params=params, timeout=self.timeout)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt == attempts or not self._is_retryable_error(exc, kind):
+                    raise ZapConnectionError(
+                        f"Could not reach ZAP at {self.api_url} "
+                        f"({type(exc).__name__} after {attempt} attempt(s)). Is ZAP running? "
+                        "See docs/ARCHITECTURE.md for how to start it with Docker."
+                    ) from exc
+                reason = type(exc).__name__
+            else:
+                if response.status_code not in RETRYABLE_STATUS_CODES or attempt == attempts:
+                    return response
+                reason = f"HTTP {response.status_code}"
+
+            delay = self.backoff_seconds * (2 ** (attempt - 1))
+            logger.warning(
+                "ZAP %s failed (%s), retrying in %.1fs (attempt %d of %d)",
+                endpoint,
+                reason,
+                delay,
+                attempt + 1,
+                attempts,
+            )
+            self._sleep(delay)
+
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def _request(
         self, component: str, kind: str, name: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """Call a ZAP JSON API endpoint and return the decoded response.
+
+        Transient failures (connection errors, timeouts, HTTP 502/503/504)
+        are retried with exponential backoff; see _is_retryable_error() for
+        why actions are retried more conservatively than views.
 
         Args:
             component: ZAP API component, e.g. "core", "spider", "ascan".
@@ -77,23 +143,18 @@ class ZapClient:
             params: query parameters for the call.
 
         Raises:
-            ZapConnectionError: ZAP is unreachable or timed out.
+            ZapConnectionError: ZAP is unreachable or timed out (after retries).
             ZapError: ZAP returned an error status or a non-JSON body.
         """
-        url = f"{self.api_url}/JSON/{component}/{kind}/{name}/"
-        try:
-            response = self.session.get(url, params=params or {}, timeout=self.timeout)
-        except (requests.ConnectionError, requests.Timeout) as exc:
-            raise ZapConnectionError(
-                f"Could not reach ZAP at {self.api_url}. Is ZAP running? "
-                "See docs/ARCHITECTURE.md for how to start it with Docker."
-            ) from exc
+        endpoint = f"{component}/{kind}/{name}"
+        url = f"{self.api_url}/JSON/{endpoint}/"
+        response = self._send(url, params or {}, kind, endpoint)
 
         try:
             body = response.json()
         except ValueError as exc:
             raise ZapError(
-                f"ZAP returned a non-JSON response from {component}/{kind}/{name} "
+                f"ZAP returned a non-JSON response from {endpoint} "
                 f"(HTTP {response.status_code})."
             ) from exc
 
@@ -103,7 +164,7 @@ class ZapClient:
             if code == "bad_api_key":
                 raise ZapError("ZAP rejected the API key. Check ZAP_API_KEY in your .env file.")
             raise ZapError(
-                f"ZAP API error from {component}/{kind}/{name} "
+                f"ZAP API error from {endpoint} "
                 f"(HTTP {response.status_code}, {code}): {message}".rstrip(": ")
             )
 

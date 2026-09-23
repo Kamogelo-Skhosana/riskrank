@@ -1,6 +1,6 @@
 """Tests for the ZAP client wrapper, using a fake HTTP session (no live ZAP).
 
-Tickets: R006, R007, R008, R009
+Tickets: R006, R007, R008, R009, R010
 """
 
 import json
@@ -27,7 +27,8 @@ def make_response(status: int = 200, body: object = None, raw: str | None = None
 class FakeSession(requests.Session):
     """Records requests and returns canned responses in order (or raises).
 
-    Pass one response, or a list to return them one per call.
+    Pass one response, or a list to return them one per call. List items
+    that are exceptions are raised instead of returned.
     """
 
     def __init__(self, response=None, exc: Exception | None = None):
@@ -40,13 +41,17 @@ class FakeSession(requests.Session):
         self.calls.append({"url": url, "params": params, "timeout": timeout})
         if self.exc:
             raise self.exc
-        if len(self.responses) > 1:
-            return self.responses.pop(0)
-        return self.responses[0]
+        item = self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
-def make_client(session: FakeSession, api_url: str = "http://localhost:8080") -> ZapClient:
-    return ZapClient(api_url=api_url, api_key="secret-key", timeout=5, session=session)
+def make_client(
+    session: FakeSession, api_url: str = "http://localhost:8080", **kwargs
+) -> ZapClient:
+    kwargs.setdefault("sleep", lambda seconds: None)  # never really wait between retries
+    return ZapClient(api_url=api_url, api_key="secret-key", timeout=5, session=session, **kwargs)
 
 
 def test_check_connection_returns_version():
@@ -356,3 +361,104 @@ def test_get_alerts_output_feeds_normalizer(sample_raw_zap_alert):
     [finding] = normalize_alerts(make_client(session).get_alerts("http://localhost:3000"))
     assert finding.type == "SQL Injection"
     assert finding.endpoint == "/api/login"
+
+
+# --- R010: retries -------------------------------------------------------------
+
+
+class RecordingSleep:
+    def __init__(self):
+        self.delays: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.delays.append(seconds)
+
+
+VERSION_OK = {"version": "2.16.0"}
+
+
+def test_view_retries_connection_error_then_succeeds():
+    session = FakeSession(
+        [
+            requests.ConnectionError("refused"),
+            requests.ConnectionError("refused"),
+            make_response(body=VERSION_OK),
+        ]
+    )
+    sleep = RecordingSleep()
+    assert make_client(session, sleep=sleep).get_version() == "2.16.0"
+    assert len(session.calls) == 3
+    assert sleep.delays == [1.0, 2.0]  # exponential backoff
+
+
+def test_view_retries_read_timeout():
+    session = FakeSession([requests.ReadTimeout("slow"), make_response(body=VERSION_OK)])
+    assert make_client(session).get_version() == "2.16.0"
+    assert len(session.calls) == 2
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_retryable_status_then_success(status):
+    session = FakeSession(
+        [make_response(status=status, raw="Bad Gateway"), make_response(body=VERSION_OK)]
+    )
+    assert make_client(session).get_version() == "2.16.0"
+    assert len(session.calls) == 2
+
+
+def test_gives_up_after_max_retries_on_connection_error():
+    session = FakeSession(exc=requests.ConnectionError("refused"))
+    sleep = RecordingSleep()
+    with pytest.raises(ZapConnectionError, match="after 4 attempt"):
+        make_client(session, sleep=sleep, max_retries=3).get_version()
+    assert len(session.calls) == 4
+    assert sleep.delays == [1.0, 2.0, 4.0]
+
+
+def test_gives_up_after_max_retries_on_retryable_status():
+    body = {"code": "internal_error", "message": "overloaded"}
+    session = FakeSession(make_response(status=503, body=body))
+    with pytest.raises(ZapError, match="HTTP 503"):
+        make_client(session, max_retries=2).get_version()
+    assert len(session.calls) == 3
+
+
+def test_non_retryable_status_fails_immediately():
+    body = {"code": "bad_api_key", "message": ""}
+    session = FakeSession(make_response(status=400, body=body))
+    with pytest.raises(ZapError, match="ZAP_API_KEY"):
+        make_client(session).get_version()
+    assert len(session.calls) == 1
+
+
+def test_action_retries_when_request_never_reached_zap():
+    session = FakeSession([requests.ConnectTimeout("no route"), make_response(body={"scan": "1"})])
+    assert make_client(session).start_spider("http://localhost:3000") == "1"
+    assert len(session.calls) == 2
+
+
+def test_action_read_timeout_is_not_retried():
+    """ZAP may have started the scan already; retrying could launch a duplicate."""
+    session = FakeSession([requests.ReadTimeout("slow"), make_response(body={"scan": "1"})])
+    with pytest.raises(ZapConnectionError, match="ReadTimeout after 1 attempt"):
+        make_client(session).start_active_scan("http://localhost:3000")
+    assert len(session.calls) == 1
+
+
+def test_zero_retries_disables_retrying():
+    session = FakeSession(exc=requests.ConnectionError("refused"))
+    with pytest.raises(ZapConnectionError):
+        make_client(session, max_retries=0).get_version()
+    assert len(session.calls) == 1
+
+
+def test_negative_max_retries_rejected():
+    with pytest.raises(ValueError, match="max_retries"):
+        make_client(FakeSession(), max_retries=-1)
+
+
+def test_retry_logs_warning(caplog):
+    session = FakeSession([requests.ConnectionError("refused"), make_response(body=VERSION_OK)])
+    with caplog.at_level("WARNING", logger="riskrank.scanner.zap_client"):
+        make_client(session).get_version()
+    assert "core/view/version failed (ConnectionError), retrying in 1.0s" in caplog.text
