@@ -1,0 +1,26 @@
+[
+  {
+    "alert": "SQL Injection",
+    "risk": "High",
+    "url": "https://example-target.com/api/login",
+    "evidence": "' OR '1'='1",
+    "description": "SQL injection may be possible.",
+    "cweid": "89"
+  },
+  {
+    "alert": "Cross Site Scripting (Reflected)",
+    "risk": "Medium",
+    "url": "https://example-target.com/search",
+    "evidence": "<script>alert(1)</script>",
+    "description": "Reflected XSS may be possible.",
+    "cweid": "79"
+  },
+  {
+    "alert": "X-Content-Type-Options Header Missing",
+    "risk": "Low",
+    "url": "https://example-target.com/",
+    "evidence": "",
+    "description": "The Anti-MIME-Sniffing header is not set.",
+    "cweid": "16"
+  }
+]
