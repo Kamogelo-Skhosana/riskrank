@@ -1,6 +1,6 @@
 """Tests for the ZAP client wrapper, using a fake HTTP session (no live ZAP).
 
-Tickets: R006, R007, R008
+Tickets: R006, R007, R008, R009
 """
 
 import json
@@ -287,3 +287,72 @@ def test_run_active_scan_times_out():
         make_client(session).run_active_scan(
             "http://localhost:3000", poll_interval=4, timeout=10, sleep=clock.sleep, clock=clock
         )
+
+
+# --- R009: alerts ------------------------------------------------------------
+
+
+def _alert(n: int) -> dict:
+    return {"alert": f"Alert {n}", "risk": "Low", "url": f"http://localhost:3000/p{n}"}
+
+
+def test_get_alerts_single_page(sample_raw_zap_alert):
+    session = FakeSession(make_response(body={"alerts": [sample_raw_zap_alert]}))
+    alerts = make_client(session).get_alerts("http://localhost:3000")
+
+    assert alerts == [sample_raw_zap_alert]
+    [call] = session.calls
+    assert call["url"] == "http://localhost:8080/JSON/core/view/alerts/"
+    assert call["params"] == {"baseurl": "http://localhost:3000", "start": 0, "count": 500}
+
+
+def test_get_alerts_no_alerts():
+    session = FakeSession(make_response(body={"alerts": []}))
+    assert make_client(session).get_alerts("http://localhost:3000") == []
+
+
+def test_get_alerts_combines_multiple_pages():
+    session = FakeSession(
+        [
+            make_response(body={"alerts": [_alert(1), _alert(2)]}),
+            make_response(body={"alerts": [_alert(3), _alert(4)]}),
+            make_response(body={"alerts": [_alert(5)]}),
+        ]
+    )
+    alerts = make_client(session).get_alerts("http://localhost:3000", page_size=2)
+
+    assert [a["alert"] for a in alerts] == [f"Alert {n}" for n in range(1, 6)]
+    assert [c["params"]["start"] for c in session.calls] == [0, 2, 4]
+
+
+def test_get_alerts_exact_multiple_of_page_size_stops_on_empty_page():
+    session = FakeSession(
+        [
+            make_response(body={"alerts": [_alert(1), _alert(2)]}),
+            make_response(body={"alerts": []}),
+        ]
+    )
+    alerts = make_client(session).get_alerts("http://localhost:3000", page_size=2)
+    assert len(alerts) == 2
+    assert len(session.calls) == 2
+
+
+def test_get_alerts_unexpected_payload_raises():
+    session = FakeSession(make_response(body={"nope": []}))
+    with pytest.raises(ZapError, match="core/view/alerts"):
+        make_client(session).get_alerts("http://localhost:3000")
+
+
+def test_get_alerts_rejects_invalid_page_size():
+    with pytest.raises(ValueError, match="page_size"):
+        make_client(FakeSession()).get_alerts("http://localhost:3000", page_size=0)
+
+
+def test_get_alerts_output_feeds_normalizer(sample_raw_zap_alert):
+    """End of Phase 1 scanner chain: ZAP alerts -> Finding objects."""
+    from riskrank.scanner.normalizer import normalize_alerts
+
+    session = FakeSession(make_response(body={"alerts": [sample_raw_zap_alert]}))
+    [finding] = normalize_alerts(make_client(session).get_alerts("http://localhost:3000"))
+    assert finding.type == "SQL Injection"
+    assert finding.endpoint == "/api/login"

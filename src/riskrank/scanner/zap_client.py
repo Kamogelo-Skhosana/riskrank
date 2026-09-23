@@ -25,6 +25,8 @@ DEFAULT_SPIDER_TIMEOUT_SECONDS = 10 * 60
 # Active scans send attack payloads to every discovered URL, so they take far
 # longer than a crawl.
 DEFAULT_ACTIVE_SCAN_TIMEOUT_SECONDS = 60 * 60
+# Alerts are fetched in pages so a large scan doesn't produce one huge response.
+DEFAULT_ALERTS_PAGE_SIZE = 500
 
 ProgressCallback = Callable[[int], None]
 
@@ -243,9 +245,33 @@ class ZapClient:
         )
         return scan_id
 
-    def get_alerts(self, target_url: str) -> list[dict]:
-        """Fetch raw alerts for target_url once scanning is complete.
+    def get_alerts(
+        self, target_url: str, page_size: int = DEFAULT_ALERTS_PAGE_SIZE
+    ) -> list[dict[str, Any]]:
+        """Fetch all raw alerts ZAP has recorded for target_url.
 
-        TODO (R009): call /JSON/core/view/alerts/, return raw alert dicts.
+        Call this after run_spider() and run_active_scan() have finished.
+        Alerts are fetched in pages of page_size and combined, so large
+        scans don't produce a single huge response. The returned dicts are
+        ZAP's raw alert format, ready for scanner.normalizer.normalize_alerts().
         """
-        raise NotImplementedError
+        if page_size < 1:
+            raise ValueError("page_size must be at least 1")
+
+        alerts: list[dict[str, Any]] = []
+        start = 0
+        while True:
+            body = self._request(
+                "core",
+                "view",
+                "alerts",
+                {"baseurl": target_url, "start": start, "count": page_size},
+            )
+            page = body.get("alerts") if isinstance(body, dict) else None
+            if not isinstance(page, list):
+                raise ZapError(f"Unexpected response from ZAP core/view/alerts: {body!r}")
+
+            alerts.extend(page)
+            if len(page) < page_size:
+                return alerts
+            start += page_size
