@@ -29,7 +29,7 @@ def _issue(
 SAMPLE_REPORT_CONTEXT = {
     "target_url": "http://localhost:3000",
     "scanned_at": "2026-09-24 10:15 UTC",
-    "riskrank_version": "0.1.0",
+    "riskrank_version": "1.0.0",
     "total_findings": 57,
     "issue_count": 5,
     "summary": [

@@ -2,6 +2,8 @@
 
 riskrank is built in three phases. Each phase ends with something tangible you can actually run and demo — not just a partial pile of code. Full ticket-level breakdown is in [TICKETS.md](TICKETS.md).
 
+**Status: all three phases complete — released as v1.0.0.** See [CHANGELOG.md](../CHANGELOG.md).
+
 ---
 
 ## Phase 1 — Core Scanning Engine (17 tickets)

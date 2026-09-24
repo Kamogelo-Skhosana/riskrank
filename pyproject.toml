@@ -1,10 +1,23 @@
 [project]
 name = "riskrank"
-version = "0.1.0"
+version = "1.0.0"
 description = "AI-powered vulnerability scanner and prioritizer"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+# Keep in step with requirements.txt (tests/test_release.py checks this).
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.8",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "sqlalchemy>=2.0",
+    "jinja2>=3.1",
+    "anthropic>=0.30",
+]
 
 [project.scripts]
 riskrank = "riskrank.cli:app"

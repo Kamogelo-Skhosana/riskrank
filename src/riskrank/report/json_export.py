@@ -3,7 +3,7 @@
 Output shape (stable, so the Phase 3 dashboard and other tools can rely on it)::
 
     {
-      "riskrank_version": "0.1.0",
+      "riskrank_version": "1.0.0",
       "target_url": "http://localhost:3000",
       "scanned_at": "2026-09-23T18:00:00+00:00",
       "finding_count": 3,

@@ -467,10 +467,27 @@ def test_trend_limit_keeps_the_most_recent_scans(client, save):
     assert [p["scan_id"] for p in points] == ids[-2:]  # still oldest first
 
 
-def test_untriaged_scan_has_zero_risk(client, save):
-    save("t", [detailed("f1", "Info", "/")])
+def test_untriaged_scans_are_left_out_of_the_trend(client, save):
+    """No AI scores = no risk score; plotting it as 0 would show a false drop."""
+    first = save("t", [detailed("f1", "A", "/", 5, 5)], day=0)
+    save("t", [detailed("f1", "Info", "/")], day=1)  # --no-triage run
+    third = save("t", [detailed("f1", "A", "/", 4, 4)], day=2)
+    points = client.get("/scans/trend").json()["points"]
+    assert [p["scan_id"] for p in points] == [first, third]
+    assert points[1]["change"] == 16 - 25  # compared with the last *triaged* scan
+
+
+def test_scan_with_no_findings_is_a_real_zero(client, save):
+    save("t", [], day=0)
     [point] = client.get("/scans/trend").json()["points"]
     assert (point["risk_score"], point["max_score"], point["issue_count"]) == (0, None, 0)
+
+
+def test_trend_limit_counts_only_triaged_scans(client, save):
+    ids = [save("t", [detailed("f1", "A", "/", 5, 5)], day=d) for d in range(3)]
+    save("t", [detailed("f1", "Info", "/")], day=9)
+    points = client.get("/scans/trend", params={"limit": 2}).json()["points"]
+    assert [p["scan_id"] for p in points] == ids[-2:]
 
 
 @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 1001}, {"limit": "x"}])
@@ -824,7 +841,7 @@ def test_trend_page_select_target(client, save):
 def test_trend_page_unknown_target(client, save):
     save("http://a", [], day=0)
     assert (
-        "No scans of <code>http://zzz</code> yet."
+        "No AI-triaged scans of <code>http://zzz</code> yet."
         in client.get("/trend", params={"target": "http://zzz"}).text
     )
 

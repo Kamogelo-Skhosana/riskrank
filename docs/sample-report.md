@@ -3,7 +3,7 @@
 
 # riskrank report: http://localhost:3000
 
-**Scanned:** 2026-09-24 10:15 UTC · **Findings:** 57 raw, 5 distinct issues · **riskrank** v0.1.0
+**Scanned:** 2026-09-24 10:15 UTC · **Findings:** 57 raw, 5 distinct issues · **riskrank** v1.0.0
 
 ## Summary
 

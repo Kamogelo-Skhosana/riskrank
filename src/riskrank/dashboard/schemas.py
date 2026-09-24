@@ -122,7 +122,10 @@ class TrendPoint(BaseModel):
 
 
 class Trend(BaseModel):
-    """Risk over time, oldest scan first (GET /scans/trend)."""
+    """Risk over time, oldest scan first (GET /scans/trend).
+
+    Only scans with a risk score are included: untriaged scans are left out.
+    """
 
     target: str | None
     points: list[TrendPoint]

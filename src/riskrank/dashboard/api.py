@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -312,8 +312,19 @@ def get_risk_trend(
     risk_score = sum over distinct issue types of that type's highest
     priority score, matching how the report groups findings. Three queries
     in total: scans, per-issue maxima, and tier counts.
+
+    Scans that have findings but no AI triage (--no-triage, or no LLM key)
+    are left out: they have no risk score, and plotting them as 0 would show
+    a false drop. A scan with no findings at all is a genuine 0.
     """
-    filters = [ScanRecord.target_url == target] if target else []
+    has_triaged_finding = (
+        select(FindingRecord.id)
+        .where(FindingRecord.scan_id == ScanRecord.id, FindingRecord.priority_score.is_not(None))
+        .exists()
+    )
+    filters = [or_(ScanRecord.finding_count == 0, has_triaged_finding)]
+    if target:
+        filters.append(ScanRecord.target_url == target)
     newest = session.scalars(
         select(ScanRecord)
         .where(*filters)

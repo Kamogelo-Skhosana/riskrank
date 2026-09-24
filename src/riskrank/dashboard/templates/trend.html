@@ -67,7 +67,7 @@
   </div>
 
   <h2 id="chart-title">Risk score of <code>{{ selected }}</code> over time</h2>
-  <p class="tile-label">Sum of each distinct issue's highest priority score. Lower is better.
+  <p class="tile-label">Sum of each distinct issue's highest priority score. Lower is better. Scans without AI triage aren't shown.
     <a class="api-link" href="{{ api_url }}">JSON</a></p>
 
   <figure class="chart" id="trend-chart">
@@ -191,7 +191,8 @@
 })();
 </script>
 {% elif targets %}
-<p>No scans of <code>{{ selected }}</code> yet.</p>
+<p>No AI-triaged scans of <code>{{ selected }}</code> yet. The risk trend needs AI triage:
+  set <code>LLM_API_KEY</code> in <code>.env</code> and scan again.</p>
 {% else %}
 <p>No scans yet. Run <code>riskrank scan &lt;url&gt;</code> and refresh this page.</p>
 {% endif %}
