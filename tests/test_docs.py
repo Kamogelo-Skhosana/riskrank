@@ -48,3 +48,30 @@ def test_guide_links_resolve():
     assert (ROOT / "examples" / "context.example.toml").is_file()
     assert "#running-zap-locally" in GUIDE
     assert "### Running ZAP locally" in (ROOT / "docs" / "ARCHITECTURE.md").read_text("utf-8")
+
+
+# --- R048: README ----------------------------------------------------------------------
+
+README = (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def readme_links():
+    import re
+
+    for target in re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", README):
+        if not target.startswith(("http://", "https://")):
+            yield target
+
+
+@pytest.mark.parametrize("target", sorted(set(readme_links())))
+def test_readme_local_links_and_images_exist(target):
+    assert (ROOT / target).exists(), f"README links to missing {target}"
+
+
+def test_readme_documents_both_commands_and_the_dashboard_api():
+    for text in ("riskrank scan", "riskrank serve", "GET /scans", "GET /scans/trend", "/health"):
+        assert text in README
+
+
+def test_readme_shows_screenshots():
+    assert README.count("](docs/images/") >= 3
