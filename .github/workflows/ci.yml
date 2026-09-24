@@ -48,3 +48,33 @@ jobs:
         with:
           name: coverage-report
           path: .coverage
+
+  docker:
+    # Builds the image and smoke-tests it (R046): the CLI runs, the dashboard
+    # answers /health, and docker-compose.yml is valid.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t riskrank:ci .
+
+      - name: CLI runs in the container
+        run: docker run --rm riskrank:ci --help
+
+      - name: Dashboard answers /health
+        run: |
+          docker run -d --name riskrank-dashboard -p 127.0.0.1:8000:8000 riskrank:ci serve
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health; then exit 0; fi
+            sleep 1
+          done
+          docker logs riskrank-dashboard
+          exit 1
+
+      - name: Compose file is valid
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose --profile demo --profile cli config --services

@@ -38,12 +38,44 @@ riskrank has three logical layers, built up one per phase:
 
 ### Running ZAP locally
 
+The easiest way is Docker Compose, which starts ZAP (and the dashboard) with the
+API key from your `.env`:
+
 ```bash
-docker run -u zap -p 8080:8080 -i zaproxy/zap-stable zap.sh -daemon \
+cp .env.example .env        # then set ZAP_API_KEY to any random string
+docker compose up -d zap    # ZAP on http://localhost:8080
+```
+
+Or run ZAP on its own. Keep the quotes around `.*`: without them, shells like
+Git Bash expand it into file names. The API key must match `ZAP_API_KEY` in `.env`:
+
+```bash
+docker run -d --name zap -u zap -p 127.0.0.1:8080:8080 zaproxy/zap-stable zap.sh -daemon \
   -host 0.0.0.0 -port 8080 \
-  -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true \
+  -config "api.addrs.addr.name=.*" -config api.addrs.addr.regex=true \
   -config api.key=<your-api-key>
 ```
+
+ZAP takes 30-60 seconds to start; `riskrank scan` waits for it (up to
+`--zap-wait-seconds`, default 120) and starts a fresh ZAP session for each scan
+so old alerts don't leak into new results.
+
+When ZAP runs in Docker, `localhost` inside ZAP means ZAP's own container. To
+scan an app running on your computer, use `http://host.docker.internal:<port>`.
+
+### Running everything with Docker Compose
+
+`docker-compose.yml` defines ZAP, the dashboard, the riskrank CLI and an
+optional OWASP Juice Shop demo target:
+
+```bash
+docker compose --profile demo up -d      # ZAP + dashboard + Juice Shop
+docker compose run --rm riskrank scan http://juice-shop:3000 -y -r report.md
+# report.md is written to ./scans; open http://localhost:8000 for the dashboard
+```
+
+Ports are published on `127.0.0.1` only. The SQLite database lives in the
+`riskrank-data` volume, shared by the CLI and the dashboard.
 
 ## 2. Triage Layer (`src/riskrank/triage/`)
 

@@ -30,6 +30,16 @@ class FakeZapClient:
             raise self.fail_with
         return "2.16.0"
 
+    def wait_until_ready(self, timeout=None, on_waiting=None, **kwargs):
+        self.calls.append("wait_until_ready")
+        self.wait_timeout = timeout
+        if self.fail_with:
+            raise self.fail_with
+        return "2.16.0"
+
+    def new_session(self):
+        self.calls.append("new_session")
+
     def run_spider(self, url, on_progress=None, **kwargs):
         self.calls.append(f"run_spider {url}")
         if on_progress:
@@ -78,7 +88,8 @@ def test_scan_runs_pipeline_and_prints_findings(fake_zap):
 
     assert result.exit_code == 0, result.output
     assert fake_zap.calls == [
-        "check_connection",
+        "wait_until_ready",
+        "new_session",
         "run_spider http://localhost:3000",
         "run_active_scan http://localhost:3000",
         "get_alerts http://localhost:3000",
@@ -344,3 +355,38 @@ def test_nothing_crawled_gives_a_clear_error(fake_zap, url, docker_hint):
     assert "crawl found no pages" in result.output
     assert "run_active_scan" not in " ".join(fake_zap.calls)  # never attempted
     assert ("host.docker.internal" in result.output.replace(url, "")) is docker_hint
+
+
+# --- R046: ZAP start-up wait and fresh session --------------------------------------------
+
+
+def test_scan_starts_a_fresh_zap_session_by_default(fake_zap):
+    runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
+    assert fake_zap.calls[:3] == [
+        "wait_until_ready",
+        "new_session",
+        "run_spider http://localhost:3000",
+    ]
+
+
+def test_keep_zap_session_skips_the_reset(fake_zap):
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "--keep-zap-session"])
+    assert result.exit_code == 0, result.output
+    assert "new_session" not in fake_zap.calls
+
+
+def test_zap_wait_seconds_is_passed_through(fake_zap):
+    runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "--zap-wait-seconds", "300"])
+    assert fake_zap.wait_timeout == 300
+
+
+def test_waiting_message_is_shown(fake_zap, monkeypatch):
+    def slow_start(timeout=None, on_waiting=None, **kwargs):
+        fake_zap.calls.append("wait_until_ready")
+        on_waiting()
+        return "2.17.0"
+
+    monkeypatch.setattr(fake_zap, "wait_until_ready", slow_start)
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
+    assert "Waiting for ZAP to start..." in result.output
+    assert "Connected to ZAP 2.17.0" in result.output

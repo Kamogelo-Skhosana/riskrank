@@ -39,6 +39,8 @@ DEFAULT_ALERTS_PAGE_SIZE = 500
 # (seen on Juice Shop active scans). Keep waiting through that, but give up if
 # ZAP stays unresponsive this long.
 DEFAULT_UNRESPONSIVE_TIMEOUT_SECONDS = 5 * 60
+# ZAP takes 30-60s to start (longer on a cold Docker host).
+DEFAULT_READY_TIMEOUT_SECONDS = 120
 
 ProgressCallback = Callable[[int], None]
 
@@ -122,9 +124,16 @@ class ZapClient:
             "See docs/ARCHITECTURE.md for how to start it with Docker."
         )
 
-    def _send(self, url: str, params: dict[str, Any], kind: str, endpoint: str):
+    def _send(
+        self,
+        url: str,
+        params: dict[str, Any],
+        kind: str,
+        endpoint: str,
+        max_retries: int | None = None,
+    ):
         """GET url, retrying transient failures with exponential backoff."""
-        attempts = self.max_retries + 1
+        attempts = (self.max_retries if max_retries is None else max_retries) + 1
         for attempt in range(1, attempts + 1):
             reason: str
             try:
@@ -152,7 +161,12 @@ class ZapClient:
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _request(
-        self, component: str, kind: str, name: str, params: dict[str, Any] | None = None
+        self,
+        component: str,
+        kind: str,
+        name: str,
+        params: dict[str, Any] | None = None,
+        max_retries: int | None = None,
     ) -> dict[str, Any]:
         """Call a ZAP JSON API endpoint and return the decoded response.
 
@@ -165,6 +179,7 @@ class ZapClient:
             kind: "view" (read) or "action" (trigger something).
             name: endpoint name, e.g. "version", "scan", "status".
             params: query parameters for the call.
+            max_retries: override the client's retry count for this call.
 
         Raises:
             ZapConnectionError: ZAP is unreachable or timed out (after retries).
@@ -172,7 +187,7 @@ class ZapClient:
         """
         endpoint = f"{component}/{kind}/{name}"
         url = f"{self.api_url}/JSON/{endpoint}/"
-        response = self._send(url, params or {}, kind, endpoint)
+        response = self._send(url, params or {}, kind, endpoint, max_retries)
 
         try:
             body = response.json()
@@ -206,6 +221,48 @@ class ZapClient:
         ZapError otherwise.
         """
         return self.get_version()
+
+    def wait_until_ready(
+        self,
+        timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        on_waiting: Callable[[], None] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> str:
+        """Wait for ZAP to accept API calls, e.g. right after `docker run` or
+        `docker compose up`, and return its version.
+
+        Only "can't connect yet" is waited out. Any other ZapError (such as
+        a rejected API key) is raised immediately, since waiting won't fix it.
+
+        Args:
+            timeout: give up (ZapConnectionError) after this many seconds.
+            poll_interval: seconds between attempts.
+            on_waiting: called once, the first time ZAP isn't ready yet
+                (e.g. to print "Waiting for ZAP to start...").
+        """
+        deadline = clock() + timeout
+        announced = False
+        while True:
+            try:
+                body = self._request("core", "view", "version", max_retries=0)
+                return self._read_field(body, "version", "core/view/version")
+            except ZapConnectionError as exc:
+                if clock() >= deadline:
+                    raise ZapConnectionError(
+                        f"ZAP at {self.api_url} did not become ready within {timeout:.0f}s. "
+                        "Is it running? (docker ps; see docs/ARCHITECTURE.md)"
+                    ) from exc
+                if on_waiting and not announced:
+                    on_waiting()
+                    announced = True
+                sleep(poll_interval)
+
+    def new_session(self) -> None:
+        """Start a fresh ZAP session, discarding the sites and alerts of
+        earlier scans so they can't leak into this scan's results."""
+        self._request("core", "action", "newSession", {"name": "", "overwrite": "true"})
 
     def _read_field(self, body: dict[str, Any], field: str, endpoint: str) -> str:
         """Pull a required field out of a ZAP response, or raise ZapError."""

@@ -1,0 +1,90 @@
+# riskrank with Docker Compose (R046)
+#
+# First time:   cp .env.example .env   and set ZAP_API_KEY (any random string)
+#
+# Dashboard + ZAP:        docker compose up -d
+#                         -> http://localhost:8000
+# Demo target too:        docker compose --profile demo up -d
+#                         -> Juice Shop on http://localhost:3000
+# Run a scan:             docker compose run --rm riskrank scan http://juice-shop:3000 -y -r report.md
+#                         (reports land in ./scans; results show up in the dashboard)
+# Stop everything:        docker compose --profile demo down
+#
+# Only scan applications you own or are authorised to test.
+
+name: riskrank
+
+x-riskrank-env: &riskrank-env
+  DATABASE_URL: sqlite:////data/riskrank.db
+  ZAP_API_URL: http://zap:8080
+  DASHBOARD_HOST: 0.0.0.0
+  DASHBOARD_PORT: "8000"
+  # Inside Compose, targets are reached by service name (e.g. http://juice-shop:3000).
+  SCAN_ALLOWLIST: ${SCAN_ALLOWLIST:-localhost,127.0.0.1,host.docker.internal,juice-shop}
+
+services:
+  zap:
+    image: zaproxy/zap-stable
+    user: zap
+    command: >-
+      zap.sh -daemon -host 0.0.0.0 -port 8080
+      -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true
+      -config api.key=${ZAP_API_KEY:?Set ZAP_API_KEY in .env - see .env.example}
+    healthcheck:
+      # ZAP takes 30-60s to start; riskrank also waits for it (--zap-wait-seconds).
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:8080/ || wget -q -O /dev/null http://localhost:8080/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    ports:
+      # Only on this computer, so `riskrank scan` can also run outside Docker.
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    image: riskrank:latest
+    command: ["serve"]
+    env_file: .env
+    environment: *riskrank-env
+    ports:
+      # Published on localhost only: the dashboard has no login yet.
+      - "127.0.0.1:${DASHBOARD_PORT:-8000}:8000"
+    volumes:
+      - riskrank-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  riskrank:
+    # The CLI, for `docker compose run --rm riskrank scan ...`; not started by `up`.
+    image: riskrank:latest
+    build: .
+    profiles: ["cli"]
+    env_file: .env
+    environment: *riskrank-env
+    volumes:
+      - riskrank-data:/data
+      - ./scans:/scans
+    depends_on:
+      zap:
+        condition: service_healthy
+    extra_hosts:
+      # Lets Linux hosts use host.docker.internal too (Docker Desktop has it built in).
+      - "host.docker.internal:host-gateway"
+
+  juice-shop:
+    # Deliberately vulnerable demo target (OWASP Juice Shop). Never expose it publicly.
+    image: bkimminich/juice-shop
+    profiles: ["demo"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+volumes:
+  riskrank-data:

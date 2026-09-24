@@ -11,6 +11,9 @@ build/
 # Env & secrets
 .env
 
+# Scan outputs (docker compose run writes to ./scans)
+scans/
+
 # Database
 *.db
 riskrank.db

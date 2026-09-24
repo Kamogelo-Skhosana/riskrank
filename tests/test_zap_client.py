@@ -601,3 +601,56 @@ def test_count_urls_unexpected_payload():
     session = FakeSession(make_response(body={"nope": 1}))
     with pytest.raises(ZapError, match="core/view/urls"):
         make_client(session).count_urls("http://t")
+
+
+# --- R046: waiting for ZAP to start, fresh sessions ------------------------------------
+
+
+def test_wait_until_ready_returns_immediately_when_up():
+    session = FakeSession(make_response(body={"version": "2.17.0"}))
+    waited = []
+    version = make_client(session).wait_until_ready(on_waiting=lambda: waited.append(1))
+    assert version == "2.17.0"
+    assert waited == []
+
+
+def test_wait_until_ready_waits_for_zap_to_start():
+    refused = requests.ConnectionError("refused")
+    session = FakeSession([refused, refused, refused, make_response(body={"version": "2.17.0"})])
+    clock = FakeClock()
+    waited = []
+
+    version = make_client(session).wait_until_ready(
+        poll_interval=2, on_waiting=lambda: waited.append(1), sleep=clock.sleep, clock=clock
+    )
+
+    assert version == "2.17.0"
+    assert waited == [1]  # announced once, not on every attempt
+    assert len(session.calls) == 4  # no hidden retries inside each attempt
+    assert clock.sleeps == [2, 2, 2]
+
+
+def test_wait_until_ready_times_out():
+    session = FakeSession(exc=requests.ConnectionError("refused"))
+    clock = FakeClock()
+    with pytest.raises(ZapConnectionError, match="did not become ready within 10s"):
+        make_client(session).wait_until_ready(
+            timeout=10, poll_interval=4, sleep=clock.sleep, clock=clock
+        )
+    assert clock.now >= 10
+
+
+def test_wait_until_ready_does_not_wait_out_a_bad_api_key():
+    body = {"code": "bad_api_key", "message": ""}
+    session = FakeSession(make_response(status=400, body=body))
+    with pytest.raises(ZapError, match="ZAP_API_KEY"):
+        make_client(session).wait_until_ready()
+    assert len(session.calls) == 1
+
+
+def test_new_session_overwrites_the_current_one():
+    session = FakeSession(make_response(body={"Result": "OK"}))
+    make_client(session).new_session()
+    [call] = session.calls
+    assert call["url"].endswith("/JSON/core/action/newSession/")
+    assert call["params"] == {"name": "", "overwrite": "true"}

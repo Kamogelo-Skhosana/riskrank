@@ -6,3 +6,5 @@ pytest-mock>=3.14
 ruff==0.16.8
 black==26.5.1
 pre-commit>=3.7
+# Parses docker-compose.yml / ci.yml in tests/test_deployment.py
+pyyaml>=6.0

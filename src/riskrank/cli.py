@@ -31,6 +31,7 @@ from riskrank.report.persistence import get_engine, save_scan
 from riskrank.scanner.models import Finding
 from riskrank.scanner.normalizer import normalize_alerts
 from riskrank.scanner.zap_client import (
+    DEFAULT_READY_TIMEOUT_SECONDS,
     DEFAULT_SPIDER_TIMEOUT_SECONDS,
     ZapClient,
     ZapError,
@@ -94,16 +95,27 @@ def _nothing_crawled_message(url: str) -> str:
 
 
 def run_scan(
-    client: ZapClient, url: str, max_scan_minutes: float = DEFAULT_MAX_SCAN_MINUTES
+    client: ZapClient,
+    url: str,
+    max_scan_minutes: float = DEFAULT_MAX_SCAN_MINUTES,
+    zap_wait_seconds: float = DEFAULT_READY_TIMEOUT_SECONDS,
+    fresh_session: bool = True,
 ) -> list[Finding]:
     """Spider + active-scan url with ZAP and return normalized findings.
 
-    If the spider or the active scan runs past its time limit, it is stopped
-    in ZAP and the scan continues with the alerts found up to that point,
-    instead of throwing away a long scan's results.
+    Waits for ZAP to finish starting (up to zap_wait_seconds) and, by
+    default, starts a fresh ZAP session so alerts from earlier scans can't
+    leak into this one. If the spider or the active scan runs past its time
+    limit, it is stopped in ZAP and the scan continues with the alerts found
+    up to that point, instead of throwing away a long scan's results.
     """
-    version = client.check_connection()
+    version = client.wait_until_ready(
+        timeout=zap_wait_seconds,
+        on_waiting=lambda: console.print("Waiting for ZAP to start..."),
+    )
     console.print(f"Connected to ZAP {version}")
+    if fresh_session:
+        client.new_session()
 
     with Progress(
         TextColumn("{task.description}"),
@@ -269,6 +281,21 @@ def scan(
             ),
         ),
     ] = DEFAULT_MAX_SCAN_MINUTES,
+    zap_wait_seconds: Annotated[
+        float,
+        typer.Option(
+            "--zap-wait-seconds",
+            min=0,
+            help="How long to wait for ZAP to finish starting (e.g. right after docker compose up).",
+        ),
+    ] = DEFAULT_READY_TIMEOUT_SECONDS,
+    keep_zap_session: Annotated[
+        bool,
+        typer.Option(
+            "--keep-zap-session",
+            help="Reuse ZAP's current session instead of starting a fresh one (keeps old alerts).",
+        ),
+    ] = False,
     triage: Annotated[
         bool | None,
         typer.Option(
@@ -331,7 +358,13 @@ def scan(
     llm = _llm_for_scan(triage, settings)
 
     try:
-        findings = run_scan(client, url, max_scan_minutes)
+        findings = run_scan(
+            client,
+            url,
+            max_scan_minutes,
+            zap_wait_seconds=zap_wait_seconds,
+            fresh_session=not keep_zap_session,
+        )
     except ZapError as exc:
         err_console.print(f"[red]Scan failed:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_SCAN_FAILED) from exc

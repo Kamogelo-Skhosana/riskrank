@@ -47,6 +47,12 @@ class FakeZap:
     def check_connection(self):
         return "2.17.0"
 
+    def wait_until_ready(self, **kwargs):
+        return "2.17.0"
+
+    def new_session(self):
+        pass
+
     def run_spider(self, url, on_progress=None, **kwargs):
         on_progress and on_progress(100)
         return "1"
