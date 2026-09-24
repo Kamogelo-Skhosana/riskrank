@@ -57,15 +57,11 @@ def test_openapi_docs_are_served(client):
     assert {"/health", "/scans", "/scans/trend", "/scans/{scan_id}"} <= set(schema["paths"])
 
 
-@pytest.mark.parametrize(
-    ("path", "ticket"),
-    [("/scans/1", "R037"), ("/scans/trend", "R038")],
-)
-def test_unfinished_endpoints_return_501(client, path, ticket):
+def test_unfinished_trend_endpoint_returns_501(client):
     """/scans/trend must reach its own handler, not /scans/{scan_id} (route order)."""
-    response = client.get(path)
+    response = client.get("/scans/trend")
     assert response.status_code == 501
-    assert ticket in response.json()["detail"]
+    assert "R038" in response.json()["detail"]
 
 
 def test_health_reports_database_errors(client):
@@ -269,3 +265,138 @@ def test_scans_query_count_does_not_grow_with_page_size(client, save):
     finally:
         event.remove(engine, "before_cursor_execute", listener)
     assert len([s for s in statements if s.lstrip().upper().startswith("SELECT")]) == 4
+
+
+# --- R037: GET /scans/{scan_id} ---------------------------------------------------------
+
+
+def detailed(fid, type_, endpoint, exploit=None, impact=None, **extra):
+    extra.setdefault("ai_explanation", f"Why {type_}." if exploit else None)
+    extra.setdefault("suggested_fix", f"Fix {type_}." if exploit else None)
+    return Finding(
+        id=fid,
+        type=type_,
+        severity_raw=extra.pop("severity_raw", "Medium"),
+        endpoint=endpoint,
+        exploitability_score=exploit,
+        business_impact_score=impact,
+        **extra,
+    )
+
+
+@pytest.fixture
+def juice_scan(save):
+    return save(
+        "http://localhost:3000",
+        [
+            detailed("finding-001", "CSP Header Not Set", "/", 4, 5),  # 20 Medium
+            detailed(
+                "finding-002",
+                "SQL Injection",
+                "/rest/user/login",
+                9,
+                9,
+                severity_raw="High",
+                cwe_id=89,
+                evidence="' OR 1=1--",
+            ),  # 81 Critical
+            detailed("finding-003", "CSP Header Not Set", "/main.js", 4, 5),
+            detailed("finding-004", "User Agent Fuzzer", "/assets", severity_raw="Informational"),
+        ],
+    )
+
+
+def test_scan_detail(client, juice_scan):
+    response = client.get(f"/scans/{juice_scan}")
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["scan"]["id"] == juice_scan
+    assert body["scan"]["finding_count"] == 4
+    assert body["scan"]["top_finding"]["type"] == "SQL Injection"
+
+    issues = body["issues"]
+    assert [(i["rank"], i["type"], i["priority_tier"]) for i in issues] == [
+        (1, "SQL Injection", "Critical"),
+        (2, "CSP Header Not Set", "Medium"),
+        (3, "User Agent Fuzzer", None),
+    ]
+    sqli = issues[0]
+    assert sqli["priority_score"] == 81
+    assert sqli["cwe_id"] == 89
+    assert sqli["evidence"] == "' OR 1=1--"
+    assert sqli["explanation"] == "Why SQL Injection."
+    assert sqli["suggested_fix"] == "Fix SQL Injection."
+    assert issues[1]["endpoints"] == ["/", "/main.js"]
+    assert issues[1]["occurrences"] == 2
+
+    findings = body["findings"]
+    assert [f["id"] for f in findings] == [
+        "finding-002",
+        "finding-001",
+        "finding-003",
+        "finding-004",
+    ]
+    assert findings[0]["priority_score"] == 81
+    assert findings[-1]["priority_tier"] is None
+
+
+def test_scan_detail_matches_the_markdown_report_order(client, juice_scan, db_url):
+    """Dashboard and report use the same ranking + grouping."""
+    from riskrank.report.markdown import build_report_context
+    from riskrank.report.persistence import load_scan
+
+    engine = get_engine(db_url)
+    _, findings = load_scan(engine, juice_scan)
+    engine.dispose()
+    report = build_report_context("t", findings)
+    report_order = [i.type for i in report.fix_first + report.other + report.untriaged]
+
+    api_order = [i["type"] for i in client.get(f"/scans/{juice_scan}").json()["issues"]]
+    assert api_order == report_order
+
+
+@pytest.mark.parametrize(
+    ("tiers", "issue_types", "finding_ids"),
+    [
+        (["Critical"], ["SQL Injection"], ["finding-002"]),
+        (["Medium"], ["CSP Header Not Set"], ["finding-001", "finding-003"]),
+        (
+            ["Critical", "Medium"],
+            ["SQL Injection", "CSP Header Not Set"],
+            ["finding-002", "finding-001", "finding-003"],
+        ),
+        (["High"], [], []),
+    ],
+)
+def test_filter_by_tier(client, juice_scan, tiers, issue_types, finding_ids):
+    body = client.get(f"/scans/{juice_scan}", params={"tier": tiers}).json()
+    assert [i["type"] for i in body["issues"]] == issue_types
+    assert [f["id"] for f in body["findings"]] == finding_ids
+    assert body["scan"]["finding_count"] == 4  # summary always covers the whole scan
+
+
+def test_tier_filter_keeps_overall_issue_ranks(client, juice_scan):
+    body = client.get(f"/scans/{juice_scan}", params={"tier": "Medium"}).json()
+    assert body["issues"][0]["rank"] == 2
+
+
+def test_invalid_tier_is_rejected(client, juice_scan):
+    assert client.get(f"/scans/{juice_scan}", params={"tier": "Urgent"}).status_code == 422
+
+
+def test_unknown_scan_returns_404(client):
+    response = client.get("/scans/999")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Scan 999 not found."
+
+
+def test_non_numeric_scan_id_returns_422(client):
+    assert client.get("/scans/abc").status_code == 422
+
+
+def test_scan_with_no_findings(client, save):
+    scan_id = save("t", [])
+    body = client.get(f"/scans/{scan_id}").json()
+    assert body["issues"] == [] and body["findings"] == []
+    assert body["scan"]["top_finding"] is None

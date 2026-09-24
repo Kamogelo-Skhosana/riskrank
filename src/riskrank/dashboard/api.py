@@ -19,14 +19,26 @@ from sqlalchemy.orm import Session
 
 from riskrank import __version__
 from riskrank.config import load_settings
-from riskrank.dashboard.schemas import ScanList, ScanSummary, TierCounts, TopFinding
+from riskrank.dashboard.schemas import (
+    FindingOut,
+    IssueOut,
+    PriorityTier,
+    ScanDetail,
+    ScanList,
+    ScanSummary,
+    TierCounts,
+    TopFinding,
+)
+from riskrank.report.markdown import group_into_issues
 from riskrank.report.persistence import (
     FindingRecord,
     ScanRecord,
     get_engine,
     get_session_factory,
     init_db,
+    record_to_finding,
 )
+from riskrank.triage.triage import rank_findings
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
@@ -106,13 +118,25 @@ def create_app(database_url: str | None = None) -> FastAPI:
         """
         raise _not_implemented("R038")
 
-    @app.get("/scans/{scan_id}", tags=["scans"])
-    def get_scan(scan_id: int, session: DbSession) -> dict:
-        """Get full findings detail for one scan.
-
-        TODO (R037): query findings for scan_id, return ranked list.
-        """
-        raise _not_implemented("R037")
+    @app.get(
+        "/scans/{scan_id}",
+        tags=["scans"],
+        response_model=ScanDetail,
+        responses={404: {"description": "No scan with this ID"}},
+    )
+    def get_scan(
+        scan_id: int,
+        session: DbSession,
+        tier: Annotated[
+            list[PriorityTier] | None,
+            Query(description="Only issues/findings in these tiers (repeatable)."),
+        ] = None,
+    ) -> ScanDetail:
+        """One scan's findings: grouped issues and individual findings, AI-ranked."""
+        detail = get_scan_detail(session, scan_id, tiers=tier)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found.")
+        return detail
 
     return app
 
@@ -138,6 +162,11 @@ def list_scan_summaries(
         .limit(limit)
         .offset(offset)
     ).all()
+    return ScanList(items=_summarize(session, scans), total=total, limit=limit, offset=offset)
+
+
+def _summarize(session: Session, scans: list[ScanRecord]) -> list[ScanSummary]:
+    """Summary rows for these scans in two queries (tier counts, top findings)."""
     scan_ids = [scan.id for scan in scans]
 
     tier_counts: dict[int, TierCounts] = {scan_id: TierCounts() for scan_id in scan_ids}
@@ -152,7 +181,7 @@ def list_scan_summaries(
 
     top_findings = _top_findings(session, scan_ids)
 
-    items = [
+    return [
         ScanSummary(
             id=scan.id,
             target_url=scan.target_url,
@@ -165,7 +194,6 @@ def list_scan_summaries(
         )
         for scan in scans
     ]
-    return ScanList(items=items, total=total, limit=limit, offset=offset)
 
 
 def _top_findings(session: Session, scan_ids: list[int]) -> dict[int, TopFinding]:
@@ -204,3 +232,55 @@ def _top_findings(session: Session, scan_ids: list[int]) -> dict[int, TopFinding
         )
         for row in rows
     }
+
+
+# --- R037: scan detail ---------------------------------------------------------------
+
+
+def get_scan_detail(
+    session: Session, scan_id: int, tiers: list[str] | None = None
+) -> ScanDetail | None:
+    """A scan's summary plus its issues and findings, AI-ranked.
+
+    Uses the same ranking (rank_findings) and grouping (group_into_issues)
+    as the CLI and the Markdown report, so all three always agree. tiers
+    filters issues and findings to those priority tiers; the summary always
+    describes the whole scan. Returns None if the scan doesn't exist.
+    """
+    scan = session.get(ScanRecord, scan_id)
+    if scan is None:
+        return None
+
+    records = session.scalars(
+        select(FindingRecord).where(FindingRecord.scan_id == scan_id).order_by(FindingRecord.id)
+    ).all()
+    ranked = rank_findings([record_to_finding(r) for r in records])
+    issues = group_into_issues(ranked)
+
+    wanted = set(tiers) if tiers else None
+    if wanted is not None:
+        ranked = [f for f in ranked if f.priority_tier in wanted]
+
+    return ScanDetail(
+        scan=_summarize(session, [scan])[0],
+        issues=[
+            IssueOut(
+                rank=position,
+                type=issue.type,
+                severity_raw=issue.severity_raw,
+                priority_tier=issue.tier,
+                priority_score=issue.score,
+                exploitability_score=issue.exploitability,
+                business_impact_score=issue.impact,
+                cwe_id=issue.cwe_id,
+                explanation=issue.explanation,
+                suggested_fix=issue.suggested_fix,
+                evidence=issue.evidence,
+                endpoints=issue.all_endpoints,
+                occurrences=issue.occurrences,
+            )
+            for position, issue in enumerate(issues, start=1)
+            if wanted is None or issue.tier in wanted
+        ],
+        findings=[FindingOut(**f.model_dump()) for f in ranked],
+    )
