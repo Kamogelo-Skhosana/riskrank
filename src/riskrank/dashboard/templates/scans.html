@@ -47,7 +47,7 @@
           <span class="muted">—</span>
         {% endif %}
       </td>
-      <td><a href="/scans/{{ scan.id }}">Details</a></td>
+      <td><a href="{{ url_for('scan_detail_page', scan_id=scan.id).path }}">Details</a></td>
     </tr>
   {% endfor %}
   </tbody>

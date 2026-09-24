@@ -13,14 +13,17 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from riskrank import __version__
-from riskrank.dashboard.api import list_scan_summaries
+from riskrank.dashboard.api import get_scan_detail, list_scan_summaries
+from riskrank.dashboard.schemas import PriorityTier
 
 PAGE_SIZE = 25
+ENDPOINTS_SHOWN = 10  # per issue, before "show all"
+TIER_FILTERS = ["Critical", "High", "Medium", "Low"]
 TEMPLATES = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 
@@ -69,5 +72,34 @@ def scan_list_page(
             "next_url": (
                 _page_url(request, target=target, page=page + 1) if page < page_count else None
             ),
+        },
+    )
+
+
+@router.get("/scan/{scan_id}", response_class=HTMLResponse, name="scan_detail_page")
+def scan_detail_page(
+    request: Request,
+    scan_id: int,
+    tier: Annotated[PriorityTier | None, Query()] = None,
+) -> HTMLResponse:
+    """One scan's prioritized issues with explanations and fixes (R040)."""
+    with request.app.state.session_factory() as session:
+        detail = get_scan_detail(session, scan_id, tiers=[tier] if tier else None)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found.")
+
+    triaged = [issue for issue in detail.issues if issue.priority_tier is not None]
+    untriaged = [issue for issue in detail.issues if issue.priority_tier is None]
+    return TEMPLATES.TemplateResponse(
+        request,
+        "scan.html",
+        {
+            "detail": detail,
+            "scan": detail.scan,
+            "triaged": triaged,
+            "untriaged": untriaged,
+            "tier": tier,
+            "tier_filters": TIER_FILTERS,
+            "endpoints_shown": ENDPOINTS_SHOWN,
         },
     )

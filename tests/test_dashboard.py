@@ -504,7 +504,7 @@ def test_scan_list_page_shows_date_target_and_top_finding(client, save):
     assert "<code>/rest/user/login</code>" in html
     assert "1 Critical · 0 High · 0 Medium · 1 Low" in html
     assert "2 triaged" in html  # 3 findings, 2 triaged
-    assert f'href="/scans/{scan_id}"' in html
+    assert f'href="/scan/{scan_id}"' in html  # detail page (R040)
 
 
 def test_scan_list_page_untriaged_scan(client, save):
@@ -593,3 +593,111 @@ def test_page_links_are_relative_paths(client):
     html = client.get("/").text
     assert 'action="/"' in html
     assert "http://testserver" not in html
+
+
+# --- R040: scan detail page -----------------------------------------------------------
+
+
+def test_scan_detail_page(client, juice_scan):
+    response = client.get(f"/scan/{juice_scan}")
+    assert response.status_code == 200
+    html = response.text
+
+    assert f"Scan #{juice_scan}: <code>http://localhost:3000</code>" in html
+    assert "4 findings" in html and "3 triaged" in html
+    assert f'href="/scans/{juice_scan}">JSON</a>' in html
+    assert "<strong>Fix first:</strong> SQL Injection" in html
+    # Summary table
+    assert '<td class="tier tier-critical">Critical</td><td class="num">1</td>' in html
+    # Issues in priority order, with explanations and fixes
+    assert html.index("1. <span") < html.index("2. <span")
+    assert "[Critical]</span> SQL Injection</h3>" in html
+    assert "[Medium]</span> CSP Header Not Set</h3>" in html
+    assert "(exploitability 9/10 × business impact 9/10)" in html
+    assert "<strong>Why it matters:</strong> Why SQL Injection." in html
+    assert "<strong>How to fix:</strong> Fix SQL Injection." in html
+    assert 'href="https://cwe.mitre.org/data/definitions/89.html"' in html
+    assert "<pre><code>&#39; OR 1=1--</code></pre>" in html
+    assert "Found on 2 endpoints:" in html
+    # Untriaged issues are listed separately
+    assert '<h2 id="untriaged-heading">Not triaged</h2>' in html
+    assert "<td>User Agent Fuzzer</td>" in html
+
+
+def test_scan_list_links_to_detail_page(client, juice_scan):
+    detail_href = f'href="/scan/{juice_scan}"'
+    assert detail_href in client.get("/").text
+    assert client.get(f"/scan/{juice_scan}").status_code == 200
+
+
+def test_scan_detail_page_tier_filter(client, juice_scan):
+    html = client.get(f"/scan/{juice_scan}", params={"tier": "Medium"}).text
+    assert "CSP Header Not Set</h3>" in html
+    assert "SQL Injection</h3>" not in html
+    assert "Not triaged" not in html.split('<h2 id="issues-heading">')[1]
+    assert '<strong aria-current="page">Medium</strong>' in html
+    assert f'href="/scan/{juice_scan}">All</a>' in html
+    # Issue keeps its overall rank number
+    assert "2. <span" in html
+
+
+def test_scan_detail_page_tier_with_no_issues(client, juice_scan):
+    html = client.get(f"/scan/{juice_scan}", params={"tier": "High"}).text
+    assert "No High issues in this scan." in html
+
+
+def test_scan_detail_page_invalid_tier(client, juice_scan):
+    assert client.get(f"/scan/{juice_scan}", params={"tier": "Urgent"}).status_code == 422
+
+
+def test_scan_detail_page_not_found(client):
+    response = client.get("/scan/999")
+    assert response.status_code == 404
+
+
+def test_scan_detail_page_untriaged_scan(client, save):
+    scan_id = save("t", [detailed("f1", "Info", "/")])
+    html = client.get(f"/scan/{scan_id}").text
+    assert "hasn't been AI-triaged" in html
+    assert "<td>Info</td>" in html
+
+
+def test_scan_detail_page_empty_scan(client, save):
+    scan_id = save("t", [])
+    assert "No findings in this scan." in client.get(f"/scan/{scan_id}").text
+
+
+def test_scan_detail_page_collapses_long_endpoint_lists(client, save):
+    scan_id = save("t", [detailed(f"f{i}", "CSP", f"/page{i}", 4, 5) for i in range(14)])
+    html = client.get(f"/scan/{scan_id}").text
+    assert "Found on 14 endpoints:" in html
+    assert "<summary>Show 4 more</summary>" in html
+    assert html.index("<code>/page9</code>") < html.index("Show 4 more")
+    assert html.index("Show 4 more") < html.index("<code>/page13</code>")
+
+
+def test_scan_detail_page_escapes_untrusted_text(client, save):
+    scan_id = save(
+        "t",
+        [
+            detailed(
+                "f1",
+                "<script>alert(1)</script>",
+                "/<img src=x>",
+                9,
+                9,
+                ai_explanation="<b>bold</b> claim",
+                evidence="</code></pre><script>x</script>",
+            )
+        ],
+    )
+    html = client.get(f"/scan/{scan_id}").text
+    assert "<script>" not in html
+    assert "<img src=x>" not in html
+    assert "<b>bold</b>" not in html
+    assert "&lt;/code&gt;&lt;/pre&gt;&lt;script&gt;" in html
+
+
+def test_external_links_open_safely(client, juice_scan):
+    html = client.get(f"/scan/{juice_scan}").text
+    assert 'rel="noopener noreferrer" target="_blank"' in html
