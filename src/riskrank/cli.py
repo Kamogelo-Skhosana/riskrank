@@ -3,8 +3,9 @@
 Usage:
     riskrank scan <url>     scan a target, triage and report the findings
     riskrank serve          run the web dashboard for saved scans
+    riskrank demo           load sample scans for a demo (no ZAP or AI needed)
 
-Tickets: R015, R016, R017, R019, R031, R033, R034, R035, R044, R045
+Tickets: R015, R016, R017, R019, R031, R033, R034, R035, R044, R045, R049
 """
 
 from collections.abc import Callable
@@ -465,6 +466,43 @@ def serve(
         port=port,
         reload=reload,
     )
+
+
+@app.command()
+def demo(
+    force: Annotated[
+        bool, typer.Option("--force", help="Add the demo scans again even if already loaded.")
+    ] = False,
+):
+    """Load sample scan history for a demo (no ZAP, target or AI key needed)."""
+    from riskrank.demo import DEMO_TARGET, seed_demo_data
+
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")
+        raise typer.Exit(EXIT_CONFIG_ERROR) from exc
+
+    engine = get_engine(settings.database_url)
+    try:
+        scan_ids = seed_demo_data(engine, force=force)
+    finally:
+        engine.dispose()
+
+    if not scan_ids:
+        console.print(
+            f"Demo scans of {escape(DEMO_TARGET)} are already loaded. "
+            "Use --force to add them again.",
+            soft_wrap=True,
+        )
+        return
+    console.print(
+        f"Loaded {len(scan_ids)} sample scans of {escape(DEMO_TARGET)} "
+        f"(scan IDs {scan_ids[0]}-{scan_ids[-1]}). These are sample data for demos, "
+        "not a real scan.",
+        soft_wrap=True,
+    )
+    console.print("Open the dashboard with: riskrank serve")
 
 
 if __name__ == "__main__":

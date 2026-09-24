@@ -62,6 +62,9 @@ docker compose run --rm riskrank scan http://juice-shop:3000 -y -r report.md
 
 Open the dashboard at **<http://localhost:8000>**. The report is written to `scans/report.md`.
 
+Presenting riskrank? `docker compose run --rm riskrank demo` loads sample scan history, and
+**[docs/DEMO.md](docs/DEMO.md)** has a 5- and 15-minute demo script.
+
 ## Quick start (Python)
 
 **Requires Python 3.11+** and a running ZAP (`docker compose up -d zap`).
@@ -88,6 +91,7 @@ When ZAP runs in Docker, use `host.docker.internal` (not `localhost`) to reach a
 ```bash
 riskrank scan <url> [options]    # scan, triage, report, save
 riskrank serve                   # web dashboard for saved scans
+riskrank demo                    # load sample scan history (no ZAP or AI key needed)
 ```
 
 | Option | What it does |
