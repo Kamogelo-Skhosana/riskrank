@@ -57,11 +57,11 @@ def test_openapi_docs_are_served(client):
     assert {"/health", "/scans", "/scans/trend", "/scans/{scan_id}"} <= set(schema["paths"])
 
 
-def test_unfinished_trend_endpoint_returns_501(client):
+def test_trend_route_is_not_captured_by_scan_id_route(client):
     """/scans/trend must reach its own handler, not /scans/{scan_id} (route order)."""
     response = client.get("/scans/trend")
-    assert response.status_code == 501
-    assert "R038" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json() == {"target": None, "points": []}
 
 
 def test_health_reports_database_errors(client):
@@ -400,3 +400,74 @@ def test_scan_with_no_findings(client, save):
     body = client.get(f"/scans/{scan_id}").json()
     assert body["issues"] == [] and body["findings"] == []
     assert body["scan"]["top_finding"] is None
+
+
+# --- R038: GET /scans/trend --------------------------------------------------------------
+
+
+def test_trend_point_values(client, save):
+    scan_id = save(
+        "http://t",
+        [
+            detailed("f1", "SQL Injection", "/login", 9, 9),  # 81 Critical
+            detailed("f2", "XSS", "/a", 6, 6),  # 36 High
+            detailed("f3", "XSS", "/b", 4, 4),  # 16 Medium: same issue, lower score
+            detailed("f4", "Header", "/", 2, 2),  # 4 Low
+            detailed("f5", "Info", "/"),  # not triaged
+        ],
+    )
+    [point] = client.get("/scans/trend").json()["points"]
+    assert point["scan_id"] == scan_id
+    assert point["target_url"] == "http://t"
+    assert datetime.fromisoformat(point["scanned_at"]) == T0
+    assert point["finding_count"] == 5
+    assert point["triaged_count"] == 4
+    assert point["issue_count"] == 3
+    # Each issue counted once at its highest score: 81 + 36 + 4.
+    assert point["risk_score"] == 121
+    assert point["max_score"] == 81
+    assert point["tier_counts"] == {"Critical": 1, "High": 1, "Medium": 1, "Low": 1}
+    assert point["change"] is None
+
+
+def test_repeated_noise_does_not_inflate_risk(client, save):
+    one = save("t", [detailed("f1", "Header", "/", 5, 5)])
+    many = save("t", [detailed(f"f{i}", "Header", f"/{i}", 5, 5) for i in range(50)], day=1)
+    points = {p["scan_id"]: p for p in client.get("/scans/trend").json()["points"]}
+    assert points[one]["risk_score"] == points[many]["risk_score"] == 25
+    assert points[many]["change"] == 0
+
+
+def test_trend_is_oldest_first_with_change_per_target(client, save):
+    s1 = save("http://a", [detailed("f1", "SQLi", "/", 9, 9)], day=0)  # 81
+    s2 = save("http://b", [detailed("f1", "XSS", "/", 5, 5)], day=1)  # 25
+    s3 = save("http://a", [detailed("f1", "XSS", "/", 5, 5)], day=2)  # 25 (SQLi fixed)
+    s4 = save("http://a", [], day=3)  # 0
+    points = client.get("/scans/trend").json()["points"]
+    assert [p["scan_id"] for p in points] == [s1, s2, s3, s4]
+    assert [p["change"] for p in points] == [None, None, -56, -25]
+
+
+def test_trend_filter_by_target(client, save):
+    save("http://a", [], day=0)
+    b = save("http://b", [], day=1)
+    body = client.get("/scans/trend", params={"target": "http://b"}).json()
+    assert body["target"] == "http://b"
+    assert [p["scan_id"] for p in body["points"]] == [b]
+
+
+def test_trend_limit_keeps_the_most_recent_scans(client, save):
+    ids = [save("t", [], day=d) for d in range(5)]
+    points = client.get("/scans/trend", params={"limit": 2}).json()["points"]
+    assert [p["scan_id"] for p in points] == ids[-2:]  # still oldest first
+
+
+def test_untriaged_scan_has_zero_risk(client, save):
+    save("t", [detailed("f1", "Info", "/")])
+    [point] = client.get("/scans/trend").json()["points"]
+    assert (point["risk_score"], point["max_score"], point["issue_count"]) == (0, None, 0)
+
+
+@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 1001}, {"limit": "x"}])
+def test_trend_rejects_invalid_limit(client, params):
+    assert client.get("/scans/trend", params=params).status_code == 422

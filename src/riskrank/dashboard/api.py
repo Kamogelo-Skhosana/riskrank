@@ -28,6 +28,8 @@ from riskrank.dashboard.schemas import (
     ScanSummary,
     TierCounts,
     TopFinding,
+    Trend,
+    TrendPoint,
 )
 from riskrank.report.markdown import group_into_issues
 from riskrank.report.persistence import (
@@ -42,6 +44,8 @@ from riskrank.triage.triage import rank_findings
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
+DEFAULT_TREND_POINTS = 100
+MAX_TREND_POINTS = 1000
 
 
 def get_session(request: Request) -> Iterator[Session]:
@@ -52,10 +56,6 @@ def get_session(request: Request) -> Iterator[Session]:
 
 # Route parameter type: "give this endpoint a database session".
 DbSession = Annotated[Session, Depends(get_session)]
-
-
-def _not_implemented(ticket: str) -> HTTPException:
-    return HTTPException(status_code=501, detail=f"Not implemented yet ({ticket}).")
 
 
 def create_app(database_url: str | None = None) -> FastAPI:
@@ -110,13 +110,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
     # NOTE: /scans/trend must be registered before /scans/{scan_id}. FastAPI matches
     # routes in declaration order, so otherwise "trend" is parsed as a scan_id and
     # the request fails with a 422.
-    @app.get("/scans/trend", tags=["scans"])
-    def get_trend(session: DbSession) -> dict:
-        """Get aggregated risk-over-time data across all scans.
-
-        TODO (R038): aggregate scores per scan date for a trend chart.
-        """
-        raise _not_implemented("R038")
+    @app.get("/scans/trend", tags=["scans"], response_model=Trend)
+    def get_trend(
+        session: DbSession,
+        target: Annotated[
+            str | None, Query(description="Only scans of this exact target URL.")
+        ] = None,
+        limit: Annotated[
+            int, Query(ge=1, le=MAX_TREND_POINTS, description="Most recent N scans.")
+        ] = DEFAULT_TREND_POINTS,
+    ) -> Trend:
+        """Risk over time: one point per scan, oldest first, for the trend chart."""
+        return get_risk_trend(session, target=target, limit=limit)
 
     @app.get(
         "/scans/{scan_id}",
@@ -169,15 +174,7 @@ def _summarize(session: Session, scans: list[ScanRecord]) -> list[ScanSummary]:
     """Summary rows for these scans in two queries (tier counts, top findings)."""
     scan_ids = [scan.id for scan in scans]
 
-    tier_counts: dict[int, TierCounts] = {scan_id: TierCounts() for scan_id in scan_ids}
-    if scan_ids:
-        rows = session.execute(
-            select(FindingRecord.scan_id, FindingRecord.priority_tier, func.count())
-            .where(FindingRecord.scan_id.in_(scan_ids), FindingRecord.priority_tier.is_not(None))
-            .group_by(FindingRecord.scan_id, FindingRecord.priority_tier)
-        )
-        for scan_id, tier, count in rows:
-            setattr(tier_counts[scan_id], tier, count)
+    tier_counts = _tier_counts(session, scan_ids)
 
     top_findings = _top_findings(session, scan_ids)
 
@@ -194,6 +191,20 @@ def _summarize(session: Session, scans: list[ScanRecord]) -> list[ScanSummary]:
         )
         for scan in scans
     ]
+
+
+def _tier_counts(session: Session, scan_ids: list[int]) -> dict[int, TierCounts]:
+    """Triaged findings per tier for each scan, in one query."""
+    counts = {scan_id: TierCounts() for scan_id in scan_ids}
+    if scan_ids:
+        rows = session.execute(
+            select(FindingRecord.scan_id, FindingRecord.priority_tier, func.count())
+            .where(FindingRecord.scan_id.in_(scan_ids), FindingRecord.priority_tier.is_not(None))
+            .group_by(FindingRecord.scan_id, FindingRecord.priority_tier)
+        )
+        for scan_id, tier, count in rows:
+            setattr(counts[scan_id], tier, count)
+    return counts
 
 
 def _top_findings(session: Session, scan_ids: list[int]) -> dict[int, TopFinding]:
@@ -284,3 +295,72 @@ def get_scan_detail(
         ],
         findings=[FindingOut(**f.model_dump()) for f in ranked],
     )
+
+
+# --- R038: risk trend --------------------------------------------------------------------
+
+
+def get_risk_trend(
+    session: Session, target: str | None = None, limit: int = DEFAULT_TREND_POINTS
+) -> Trend:
+    """One point per scan (the most recent `limit`), oldest first.
+
+    risk_score = sum over distinct issue types of that type's highest
+    priority score, matching how the report groups findings. Three queries
+    in total: scans, per-issue maxima, and tier counts.
+    """
+    filters = [ScanRecord.target_url == target] if target else []
+    newest = session.scalars(
+        select(ScanRecord)
+        .where(*filters)
+        .order_by(ScanRecord.scanned_at.desc(), ScanRecord.id.desc())
+        .limit(limit)
+    ).all()
+    scans = list(reversed(newest))
+    scan_ids = [scan.id for scan in scans]
+
+    # Highest score per (scan, issue type), then aggregated per scan.
+    per_issue = (
+        select(
+            FindingRecord.scan_id.label("scan_id"),
+            func.max(FindingRecord.priority_score).label("issue_score"),
+        )
+        .where(FindingRecord.scan_id.in_(scan_ids), FindingRecord.priority_score.is_not(None))
+        .group_by(FindingRecord.scan_id, FindingRecord.type)
+        .subquery()
+    )
+    aggregates = {
+        row.scan_id: row
+        for row in session.execute(
+            select(
+                per_issue.c.scan_id,
+                func.count().label("issue_count"),
+                func.sum(per_issue.c.issue_score).label("risk_score"),
+                func.max(per_issue.c.issue_score).label("max_score"),
+            ).group_by(per_issue.c.scan_id)
+        )
+    }
+    tier_counts = _tier_counts(session, scan_ids)
+
+    points: list[TrendPoint] = []
+    previous: dict[str, int] = {}  # target -> last risk_score
+    for scan in scans:
+        agg = aggregates.get(scan.id)
+        risk = int(agg.risk_score) if agg else 0
+        counts = tier_counts[scan.id]
+        points.append(
+            TrendPoint(
+                scan_id=scan.id,
+                target_url=scan.target_url,
+                scanned_at=scan.scanned_at,
+                finding_count=scan.finding_count,
+                triaged_count=sum(counts.model_dump().values()),
+                issue_count=agg.issue_count if agg else 0,
+                risk_score=risk,
+                max_score=agg.max_score if agg else None,
+                tier_counts=counts,
+                change=risk - previous[scan.target_url] if scan.target_url in previous else None,
+            )
+        )
+        previous[scan.target_url] = risk
+    return Trend(target=target, points=points)

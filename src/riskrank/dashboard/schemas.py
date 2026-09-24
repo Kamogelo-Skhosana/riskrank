@@ -96,3 +96,33 @@ class ScanDetail(BaseModel):
     scan: ScanSummary
     issues: list[IssueOut] = Field(description="Grouped issues, highest priority first.")
     findings: list[FindingOut] = Field(description="Individual findings, AI-ranked.")
+
+
+class TrendPoint(BaseModel):
+    """One scan's position on the risk-over-time chart."""
+
+    scan_id: int
+    target_url: str
+    scanned_at: datetime
+    finding_count: int
+    triaged_count: int
+    issue_count: int = Field(description="Distinct triaged issues (findings grouped by type).")
+    risk_score: int = Field(
+        description=(
+            "Sum of each distinct issue's highest priority score. Counts an issue once "
+            "however many pages it appears on, so fixing one bug moves the line, and "
+            "repeated scanner noise doesn't inflate it."
+        )
+    )
+    max_score: int | None = Field(description="Highest single priority score in the scan.")
+    tier_counts: TierCounts
+    change: int | None = Field(
+        description="risk_score minus the previous scan of the same target (null for the first)."
+    )
+
+
+class Trend(BaseModel):
+    """Risk over time, oldest scan first (GET /scans/trend)."""
+
+    target: str | None
+    points: list[TrendPoint]
