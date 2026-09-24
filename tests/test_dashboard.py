@@ -476,6 +476,13 @@ def test_trend_rejects_invalid_limit(client, params):
     assert client.get("/scans/trend", params=params).status_code == 422
 
 
+def badge(tier):
+    return (
+        f'<span class="badge tier-{tier.lower()}">'
+        f'<span class="badge-dot" aria-hidden="true"></span>{tier}</span>'
+    )
+
+
 # --- R039: scan list page -------------------------------------------------------------
 
 
@@ -501,7 +508,7 @@ def test_scan_list_page_shows_date_target_and_top_finding(client, save):
     assert "2026-09-20 10:00 UTC" in html
     assert '<time datetime="2026-09-20T10:00:00+00:00">' in html
     assert "<code>http://localhost:3000</code>" in html
-    assert "[Critical]</span>\n          SQL Injection" in html
+    assert badge("Critical") + "\n          SQL Injection" in html
     assert "score 81/100" in html
     assert "<code>/rest/user/login</code>" in html
     assert "1 Critical · 0 High · 0 Medium · 1 Low" in html
@@ -610,11 +617,12 @@ def test_scan_detail_page(client, juice_scan):
     assert f'href="/scans/{juice_scan}">JSON</a>' in html
     assert "<strong>Fix first:</strong> SQL Injection" in html
     # Summary table
-    assert '<td class="tier tier-critical">Critical</td><td class="num">1</td>' in html
+    assert "<td>" + badge("Critical") + '</td><td class="num">1</td>' in html
     # Issues in priority order, with explanations and fixes
-    assert html.index("1. <span") < html.index("2. <span")
-    assert "[Critical]</span> SQL Injection</h3>" in html
-    assert "[Medium]</span> CSP Header Not Set</h3>" in html
+    assert html.index("<span>1.</span>") < html.index("<span>2.</span>")
+    assert badge("Critical") + " <span>SQL Injection</span></h3>" in html
+    assert badge("Medium") + " <span>CSP Header Not Set</span></h3>" in html
+    assert '<article class="issue tier-critical"' in html
     assert "(exploitability 9/10 × business impact 9/10)" in html
     assert "<strong>Why it matters:</strong> Why SQL Injection." in html
     assert "<strong>How to fix:</strong> Fix SQL Injection." in html
@@ -634,13 +642,13 @@ def test_scan_list_links_to_detail_page(client, juice_scan):
 
 def test_scan_detail_page_tier_filter(client, juice_scan):
     html = client.get(f"/scan/{juice_scan}", params={"tier": "Medium"}).text
-    assert "CSP Header Not Set</h3>" in html
-    assert "SQL Injection</h3>" not in html
+    assert "<span>CSP Header Not Set</span></h3>" in html
+    assert "<span>SQL Injection</span></h3>" not in html
     assert "Not triaged" not in html.split('<h2 id="issues-heading">')[1]
     assert '<strong aria-current="page">Medium</strong>' in html
     assert f'href="/scan/{juice_scan}">All</a>' in html
     # Issue keeps its overall rank number
-    assert "2. <span" in html
+    assert "<span>2.</span>" in html
 
 
 def test_scan_detail_page_tier_with_no_issues(client, juice_scan):
@@ -851,3 +859,38 @@ def test_trend_page_tooltip_data_is_json(client, save):
 
 def test_navigation_links_to_trend(client):
     assert 'href="/trend">Risk trend</a>' in client.get("/").text
+
+
+# --- R042: dashboard theme ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("path", "current"), [("/", "Scans"), ("/trend", "Risk trend")])
+def test_nav_marks_the_current_section(client, path, current):
+    html = client.get(path).text
+    assert f'aria-current="page">{current}</a>' in html
+    assert html.count('aria-current="page">') == 1
+
+
+def test_detail_page_is_in_the_scans_section(client, juice_scan):
+    assert 'aria-current="page">Scans</a>' in client.get(f"/scan/{juice_scan}").text
+
+
+@pytest.mark.parametrize("path", ["/", "/trend"])
+def test_theme_supports_light_and_dark(client, path):
+    html = client.get(path).text
+    assert '<meta name="color-scheme" content="light dark">' in html
+    assert "@media (prefers-color-scheme: dark)" in html
+    assert ':root[data-theme="dark"]' in html
+    assert ":focus-visible" in html
+
+
+def test_tier_badges_pair_colour_with_the_tier_name(client, juice_scan):
+    html = client.get(f"/scan/{juice_scan}").text
+    for tier in ("Critical", "High", "Medium", "Low"):
+        assert badge(tier) in html  # summary table shows every tier with its name
+    assert 'class="badge-dot" aria-hidden="true"' in html
+
+
+def test_tables_scroll_instead_of_overflowing_on_small_screens(client, save):
+    save("t", [])
+    assert '<div class="table-wrap">' in client.get("/").text

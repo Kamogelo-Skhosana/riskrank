@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{% from "_macros.html" import tier_badge %}
+{% set section = "scans" %}
 {% block title %}Scan #{{ scan.id }}{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('scan_list_page').path }}">← All scans</a></p>
@@ -12,14 +14,14 @@
   · <a href="/scans/{{ scan.id }}">JSON</a>
 </p>
 
-<section aria-labelledby="summary-heading">
-  <h2 id="summary-heading">Summary</h2>
+<section aria-labelledby="summary-heading" class="card">
+  <h2 id="summary-heading" style="margin-top:0">Summary</h2>
   {% if scan.triaged_count %}
   <table class="summary">
     <thead><tr><th scope="col">Priority</th><th scope="col" class="num">Findings</th></tr></thead>
     <tbody>
     {% for name in tier_filters %}
-      <tr><td class="tier tier-{{ name | lower }}">{{ name }}</td><td class="num">{{ scan.tier_counts[name] }}</td></tr>
+      <tr><td>{{ tier_badge(name) }}</td><td class="num">{{ scan.tier_counts[name] }}</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -34,19 +36,19 @@
   {% endif %}
 </section>
 
-<nav aria-label="Filter by priority" class="filters">
-  Show:
+<nav aria-label="Filter by priority" class="chips">
+  <span class="muted">Show:</span>
   {% if tier %}<a href="{{ url_for('scan_detail_page', scan_id=scan.id).path }}">All</a>{% else %}<strong aria-current="page">All</strong>{% endif %}
   {% for name in tier_filters %}
-    · {% if tier == name %}<strong aria-current="page">{{ name }}</strong>{% else %}<a href="{{ url_for('scan_detail_page', scan_id=scan.id).path }}?tier={{ name }}">{{ name }}</a>{% endif %}
+    {% if tier == name %}<strong aria-current="page">{{ name }}</strong>{% else %}<a href="{{ url_for('scan_detail_page', scan_id=scan.id).path }}?tier={{ name }}">{{ name }}</a>{% endif %}
   {% endfor %}
 </nav>
 
 <section aria-labelledby="issues-heading">
   <h2 id="issues-heading">{% if tier %}{{ tier }} issues{% else %}Issues, highest priority first{% endif %}</h2>
   {% for issue in triaged %}
-  <article class="issue" id="issue-{{ issue.rank }}">
-    <h3>{{ issue.rank }}. <span class="tier tier-{{ issue.priority_tier | lower }}">[{{ issue.priority_tier }}]</span> {{ issue.type }}</h3>
+  <article class="issue tier-{{ issue.priority_tier | lower }}" id="issue-{{ issue.rank }}">
+    <h3><span>{{ issue.rank }}.</span> {{ tier_badge(issue.priority_tier) }} <span>{{ issue.type }}</span></h3>
     <ul class="facts">
       <li><strong>Score:</strong> {{ issue.priority_score }}/100
         (exploitability {{ issue.exploitability_score }}/10 × business impact {{ issue.business_impact_score }}/10)</li>
@@ -84,6 +86,7 @@
 {% if untriaged and not tier %}
 <section aria-labelledby="untriaged-heading">
   <h2 id="untriaged-heading">Not triaged</h2>
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th scope="col">Issue</th><th scope="col">Scanner severity</th><th scope="col" class="num">Endpoints</th></tr>
@@ -98,6 +101,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% endif %}
 

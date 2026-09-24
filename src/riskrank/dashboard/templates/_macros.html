@@ -1,0 +1,7 @@
+{#- Shared UI pieces for the dashboard templates (R042). -#}
+
+{#- Priority tier badge: a coloured dot + the tier name in normal text colour, so
+    the tier is never shown by colour alone and the text always stays readable. -#}
+{% macro tier_badge(tier) -%}
+<span class="badge tier-{{ tier | lower }}"><span class="badge-dot" aria-hidden="true"></span>{{ tier }}</span>
+{%- endmacro %}

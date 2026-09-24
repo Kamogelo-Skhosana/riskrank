@@ -1,9 +1,11 @@
 {% extends "base.html" %}
+{% from "_macros.html" import tier_badge %}
+{% set section = "scans" %}
 {% block title %}Scan history{% endblock %}
 {% block content %}
 <h1>Scan history</h1>
 
-<form method="get" action="{{ url_for('scan_list_page').path }}" role="search">
+<form method="get" action="{{ url_for('scan_list_page').path }}" role="search" class="filters">
   <label for="target">Target</label>
   <input id="target" name="target" type="url" value="{{ target }}" placeholder="http://localhost:3000" size="40">
   <button type="submit">Filter</button>
@@ -12,6 +14,7 @@
 
 {% if scans.items %}
 <p class="muted">{{ scans.total }} scan{{ "" if scans.total == 1 else "s" }}{% if target %} of <code>{{ target }}</code>{% endif %}, newest first.</p>
+<div class="table-wrap">
 <table>
   <thead>
     <tr>
@@ -39,7 +42,7 @@
       </td>
       <td>
         {% if scan.top_finding %}
-          <span class="tier">[{{ scan.top_finding.priority_tier }}]</span>
+          {{ tier_badge(scan.top_finding.priority_tier) }}
           {{ scan.top_finding.type }}
           <span class="muted">· score {{ scan.top_finding.priority_score }}/100</span><br>
           <code>{{ scan.top_finding.endpoint }}</code>
@@ -52,9 +55,10 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 
 {% if page_count > 1 %}
-<nav aria-label="Pages">
+<nav aria-label="Pages" class="chips">
   {% if prev_url %}<a href="{{ prev_url }}" rel="prev">← Newer</a>{% endif %}
   <span class="muted">Page {{ page }} of {{ page_count }}</span>
   {% if next_url %}<a href="{{ next_url }}" rel="next">Older →</a>{% endif %}

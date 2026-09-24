@@ -1,29 +1,9 @@
 {% extends "base.html" %}
+{% set section = "trend" %}
 {% block title %}Risk trend{% endblock %}
 {% block head %}
 <style>
-  /* Chart tokens (dataviz reference palette); dark steps chosen for the dark surface. */
-  .viz-root {
-    color-scheme: light;
-    --surface-1: #fcfcfb; --text-primary: #0b0b0b; --text-secondary: #52514e;
-    --text-muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --series-1: #2a78d6;
-    --good: #006300; --bad: #d03b3b; --border: rgba(11,11,11,0.10);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:where(:not([data-theme="light"])) .viz-root {
-      color-scheme: dark;
-      --surface-1: #1a1a19; --text-primary: #ffffff; --text-secondary: #c3c2b7;
-      --text-muted: #898781; --grid: #2c2c2a; --axis: #383835; --series-1: #3987e5;
-      --good: #0ca30c; --bad: #e66767; --border: rgba(255,255,255,0.10);
-    }
-  }
-  :root[data-theme="dark"] .viz-root {
-    color-scheme: dark;
-    --surface-1: #1a1a19; --text-primary: #ffffff; --text-secondary: #c3c2b7;
-    --text-muted: #898781; --grid: #2c2c2a; --axis: #383835; --series-1: #3987e5;
-    --good: #0ca30c; --bad: #e66767; --border: rgba(255,255,255,0.10);
-  }
-  .viz-root { background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .viz-root { background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; box-shadow: var(--shadow); }
   .tiles { display: flex; gap: 2rem; flex-wrap: wrap; margin-bottom: 1rem; }
   .tile-label { color: var(--text-secondary); font-size: .875rem; }
   .tile-value { font-size: 2rem; font-weight: 600; }
@@ -119,6 +99,7 @@
 </section>
 
 <h2>Scans</h2>
+<div class="table-wrap">
 <table>
   <thead>
     <tr>
@@ -143,6 +124,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 
 <script>
 (function () {

@@ -3,35 +3,185 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{% block title %}riskrank{% endblock %} · riskrank</title>
   <style>
-    /* Minimal layout only; the dashboard theme comes in R042. */
-    body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 72rem; padding: 1rem; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #ddd; padding: .4rem .5rem; text-align: left; vertical-align: top; }
-    td.num, th.num { text-align: right; }
-    .muted { color: #666; }
-    .tier { font-weight: 600; white-space: nowrap; }
-    code { overflow-wrap: anywhere; }
+    /* riskrank dashboard theme (R042). Colours are tokens so light and dark
+       mode each get their own chosen values rather than an automatic invert.
+       Tier dots use the status palette (critical / serious / warning) and are
+       always paired with the tier name, never colour alone. */
+    :root {
+      color-scheme: light;
+      --page: #f9f9f7;
+      --surface-1: #fcfcfb;
+      --surface-2: #f0efec;
+      --text-primary: #0b0b0b;
+      --text-secondary: #52514e;
+      --text-muted: #6b6a66;
+      --border: rgba(11, 11, 11, 0.10);
+      --grid: #e1e0d9;
+      --axis: #c3c2b7;
+      --link: #1c5cab;
+      --focus: #2a78d6;
+      --series-1: #2a78d6;
+      --good: #006300;
+      --bad: #b8312f;
+      --tier-critical: #d03b3b;
+      --tier-high: #ec835a;
+      --tier-medium: #fab219;
+      --tier-low: #898781;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:where(:not([data-theme="light"])) {
+        color-scheme: dark;
+        --page: #0d0d0d;
+        --surface-1: #1a1a19;
+        --surface-2: #242423;
+        --text-primary: #ffffff;
+        --text-secondary: #c3c2b7;
+        --text-muted: #a3a29b;
+        --border: rgba(255, 255, 255, 0.10);
+        --grid: #2c2c2a;
+        --axis: #383835;
+        --link: #86b6ef;
+        --focus: #6da7ec;
+        --series-1: #3987e5;
+        --good: #0ca30c;
+        --bad: #e66767;
+        --shadow: none;
+      }
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface-1: #1a1a19;
+      --surface-2: #242423;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #a3a29b;
+      --border: rgba(255, 255, 255, 0.10);
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --link: #86b6ef;
+      --focus: #6da7ec;
+      --series-1: #3987e5;
+      --good: #0ca30c;
+      --bad: #e66767;
+      --shadow: none;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html { background: var(--page); }
+    body {
+      margin: 0; background: var(--page); color: var(--text-primary);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px; line-height: 1.5;
+    }
+    a { color: var(--link); text-underline-offset: 2px; }
+    a:hover { text-decoration-thickness: 2px; }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+    h1 { font-size: 1.6rem; margin: 1.25rem 0 .75rem; line-height: 1.25; }
+    h2 { font-size: 1.15rem; margin: 1.5rem 0 .6rem; }
+    h3 { font-size: 1.05rem; margin: 0 0 .5rem; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .875em; }
+    code { overflow-wrap: anywhere; background: var(--surface-2); padding: .05rem .3rem; border-radius: 4px; }
+    pre { background: var(--surface-2); padding: .75rem; border-radius: 6px; overflow-x: auto; }
+    pre code { background: none; padding: 0; }
+    .muted { color: var(--text-muted); }
     .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+    /* Layout */
+    .site-header { background: var(--surface-1); border-bottom: 1px solid var(--border); }
+    .site-header .inner, main, .site-footer {
+      max-width: 72rem; margin: 0 auto; padding-left: 1rem; padding-right: 1rem;
+    }
+    .site-header .inner { display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; min-height: 3.25rem; }
+    .brand { color: var(--text-primary); text-decoration: none; font-weight: 700; font-size: 1.1rem; }
+    .tagline { color: var(--text-muted); font-size: .875rem; }
+    .site-nav { margin-left: auto; display: flex; gap: 1rem; }
+    .site-nav a { color: var(--text-secondary); text-decoration: none; padding: .25rem 0; border-bottom: 2px solid transparent; }
+    .site-nav a:hover, .site-nav a[aria-current="page"] { color: var(--text-primary); border-bottom-color: var(--series-1); }
+    main { padding-bottom: 2rem; }
+    .site-footer { color: var(--text-muted); font-size: .8125rem; border-top: 1px solid var(--border); padding-top: .75rem; padding-bottom: 1.5rem; }
+
+    .card {
+      background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+      padding: 1rem 1.25rem; box-shadow: var(--shadow); margin-bottom: 1rem;
+    }
+
+    /* Tables */
+    .table-wrap { position: relative; overflow-x: auto; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: .55rem .75rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--grid); }
+    thead th { font-size: .8125rem; font-weight: 600; color: var(--text-secondary); background: var(--surface-2); }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: var(--surface-2); }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    /* Tables keep a readable width and scroll sideways on small screens,
+       instead of squeezing URLs into one-letter columns. */
+    .table-wrap table { min-width: 44rem; }
+    table code { white-space: nowrap; }
+
+    /* Forms and filter rows */
+    .filters { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin: 0 0 1rem; }
+    input, select, button {
+      font: inherit; color: var(--text-primary); background: var(--surface-1);
+      border: 1px solid var(--axis); border-radius: 6px; padding: .35rem .6rem;
+    }
+    input, select { max-width: 100%; }
+    button { cursor: pointer; background: var(--surface-2); font-weight: 600; }
+    button:hover { border-color: var(--text-muted); }
+    .chips { display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; margin: 0 0 1rem; }
+    .chips a, .chips strong { padding: .2rem .7rem; border-radius: 999px; border: 1px solid var(--border); text-decoration: none; font-size: .875rem; }
+    .chips a { color: var(--text-secondary); background: var(--surface-1); }
+    .chips strong { background: var(--text-primary); color: var(--page); border-color: var(--text-primary); }
+
+    /* Tier badges: dot carries the colour, the word carries the meaning. */
+    .badge { display: inline-flex; align-items: center; gap: .35rem; font-weight: 600; white-space: nowrap; font-size: .875rem; }
+    .badge-dot { width: .6rem; height: .6rem; border-radius: 50%; background: var(--tier-low); flex: none; }
+    .tier-critical .badge-dot { background: var(--tier-critical); }
+    .tier-high .badge-dot { background: var(--tier-high); }
+    .tier-medium .badge-dot { background: var(--tier-medium); }
+    .tier-low .badge-dot { background: var(--tier-low); }
+
+    /* Issue cards on the scan detail page */
+    .issue { background: var(--surface-1); border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px;
+             padding: 1rem 1.25rem; margin-bottom: 1rem; box-shadow: var(--shadow); }
+    .issue.tier-critical { border-left-color: var(--tier-critical); }
+    .issue.tier-high { border-left-color: var(--tier-high); }
+    .issue.tier-medium { border-left-color: var(--tier-medium); }
+    .issue.tier-low { border-left-color: var(--tier-low); }
+    .issue h3 { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
+    .facts { list-style: none; padding: 0; margin: 0 0 .75rem; color: var(--text-secondary); font-size: .875rem; }
+    .endpoints { margin: .25rem 0 .5rem; padding-left: 1.25rem; }
+    details { margin: .5rem 0; }
+    summary { cursor: pointer; color: var(--link); }
+
+    @media (max-width: 40rem) {
+      .site-nav { margin-left: 0; }
+      th, td { padding: .45rem .5rem; }
+    }
   </style>
   {% block head %}{% endblock %}
 </head>
 <body>
-  <header>
-    <a href="{{ url_for('scan_list_page').path }}"><strong>riskrank</strong></a>
-    <span class="muted">· AI-prioritized vulnerability scans</span>
-    <nav aria-label="Main">
-      <a href="{{ url_for('scan_list_page').path }}">Scans</a> ·
-      <a href="{{ url_for('trend_page').path }}">Risk trend</a>
-    </nav>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="{{ url_for('scan_list_page').path }}">riskrank</a>
+      <span class="tagline">AI-prioritized vulnerability scans</span>
+      {% set section = section | default("") %}
+      <nav class="site-nav" aria-label="Main">
+        <a href="{{ url_for('scan_list_page').path }}"{% if section == "scans" %} aria-current="page"{% endif %}>Scans</a>
+        <a href="{{ url_for('trend_page').path }}"{% if section == "trend" %} aria-current="page"{% endif %}>Risk trend</a>
+      </nav>
+    </div>
   </header>
   <main>
     {% block content %}{% endblock %}
   </main>
-  <footer class="muted">
-    <p>riskrank v{{ riskrank_version }} · <a href="/docs">API docs</a> ·
-      Only scan applications you own or are authorised to test.</p>
+  <footer class="site-footer">
+    riskrank v{{ riskrank_version }} · <a href="/docs">API docs</a> ·
+    Only scan applications you own or are authorised to test.
   </footer>
 </body>
 </html>
