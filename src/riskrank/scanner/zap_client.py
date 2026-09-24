@@ -337,6 +337,18 @@ class ZapClient:
         body = self._request("ascan", "action", "scan", {"url": target_url, "recurse": "true"})
         return self._read_field(body, "scan", "ascan/action/scan")
 
+    def count_urls(self, base_url: str) -> int:
+        """How many URLs under base_url ZAP knows about (its "sites tree").
+
+        Zero after a crawl means ZAP couldn't reach or crawl the target, and
+        an active scan would fail with url_not_found.
+        """
+        body = self._request("core", "view", "urls", {"baseurl": base_url})
+        urls = body.get("urls") if isinstance(body, dict) else None
+        if not isinstance(urls, list):
+            raise ZapError(f"Unexpected response from ZAP core/view/urls: {body!r}")
+        return len(urls)
+
     def stop_spider(self, scan_id: str) -> None:
         """Stop a running spider (e.g. after it hit riskrank's time limit)."""
         self._request("spider", "action", "stop", {"scanId": scan_id})

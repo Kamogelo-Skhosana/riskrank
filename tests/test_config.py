@@ -79,3 +79,32 @@ def test_invalid_database_url_raises(no_env_file, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgres://db/riskrank")
     with pytest.raises(ConfigError, match="DATABASE_URL"):
         load_settings(no_env_file)
+
+
+# --- Dashboard settings (R035) ----------------------------------------------------
+
+
+@pytest.fixture
+def clean_dashboard_env(monkeypatch):
+    for var in ("DASHBOARD_HOST", "DASHBOARD_PORT"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_dashboard_defaults_are_local_only(no_env_file, clean_dashboard_env):
+    settings = load_settings(no_env_file)
+    assert settings.dashboard_host == "127.0.0.1"
+    assert settings.dashboard_port == 8000
+
+
+def test_dashboard_settings_from_env(no_env_file, clean_dashboard_env, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_HOST", "0.0.0.0")
+    monkeypatch.setenv("DASHBOARD_PORT", "9001")
+    settings = load_settings(no_env_file)
+    assert (settings.dashboard_host, settings.dashboard_port) == ("0.0.0.0", 9001)
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "70000", "-1"])
+def test_invalid_dashboard_port_raises(no_env_file, clean_dashboard_env, monkeypatch, bad):
+    monkeypatch.setenv("DASHBOARD_PORT", bad)
+    with pytest.raises(ConfigError, match="DASHBOARD_PORT"):
+        load_settings(no_env_file)

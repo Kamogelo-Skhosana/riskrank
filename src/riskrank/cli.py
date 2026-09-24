@@ -1,9 +1,10 @@
 """CLI entry point for riskrank.
 
 Usage:
-    riskrank scan <url>
+    riskrank scan <url>     scan a target, triage and report the findings
+    riskrank serve          run the web dashboard for saved scans
 
-Tickets: R015, R016, R017, R019, R031, R033, R034
+Tickets: R015, R016, R017, R019, R031, R033, R034, R035
 """
 
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import uvicorn
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
@@ -71,6 +73,19 @@ def _stop_after_timeout(
     )
 
 
+def _nothing_crawled_message(url: str) -> str:
+    hint = (
+        " From inside Docker, 'localhost' means ZAP's own container: use "
+        "http://host.docker.internal:<port> to reach an app on your computer."
+        if "localhost" in url or "127.0.0.1" in url
+        else ""
+    )
+    return (
+        f"ZAP's crawl found no pages at {url}, so there is nothing to scan. Check that "
+        "the app is running (docker ps) and reachable from ZAP's container." + hint
+    )
+
+
 def run_scan(
     client: ZapClient, url: str, max_scan_minutes: float = DEFAULT_MAX_SCAN_MINUTES
 ) -> list[Finding]:
@@ -97,6 +112,9 @@ def run_scan(
             _stop_after_timeout(
                 client.stop_spider, exc, "crawl", DEFAULT_SPIDER_TIMEOUT_SECONDS / 60
             )
+
+        if client.count_urls(url) == 0:
+            raise ZapError(_nothing_crawled_message(url))
 
         scan_task = progress.add_task("Active scan", total=100)
         try:
@@ -317,6 +335,49 @@ def _write_or_exit(what: str, path: Path, write: Callable[[], Path]) -> Path:
             f"[red]Could not write {what} to {escape(str(path))}:[/red] {escape(str(exc))}"
         )
         raise typer.Exit(EXIT_SCAN_FAILED) from exc
+
+
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+@app.command()
+def serve(
+    host: Annotated[
+        str | None,
+        typer.Option(help="Address to listen on. Default: DASHBOARD_HOST (127.0.0.1)."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(min=1, max=65535, help="Port to listen on. Default: DASHBOARD_PORT (8000)."),
+    ] = None,
+    reload: Annotated[
+        bool, typer.Option(help="Restart automatically when code changes (development).")
+    ] = False,
+):
+    """Run the web dashboard for saved scans (reads DATABASE_URL)."""
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")
+        raise typer.Exit(EXIT_CONFIG_ERROR) from exc
+
+    host = host or settings.dashboard_host
+    port = port or settings.dashboard_port
+    if host not in LOCAL_HOSTS:
+        err_console.print(
+            f"[yellow]Warning: listening on {escape(host)} makes the dashboard reachable "
+            "from other machines, and it has no login yet.[/yellow]",
+            soft_wrap=True,
+        )
+    shown_host = "localhost" if host in {"127.0.0.1", "0.0.0.0", "::1", "::"} else host
+    console.print(f"riskrank dashboard: http://{shown_host}:{port}  (Ctrl+C to stop)")
+    uvicorn.run(
+        "riskrank.dashboard.api:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        reload=reload,
+    )
 
 
 if __name__ == "__main__":

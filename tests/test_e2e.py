@@ -55,6 +55,9 @@ class FakeZap:
         on_progress and on_progress(100)
         return "2"
 
+    def count_urls(self, url):
+        return getattr(self, "known_urls", 1)
+
     def get_alerts(self, url):
         return self.alerts
 

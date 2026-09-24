@@ -587,3 +587,17 @@ def test_timeout_error_carries_scan_id_and_progress():
         )
     assert exc.value.scan_id == "9"
     assert exc.value.progress == 55
+
+
+def test_count_urls():
+    session = FakeSession(make_response(body={"urls": ["http://t/", "http://t/a"]}))
+    assert make_client(session).count_urls("http://t") == 2
+    [call] = session.calls
+    assert call["url"].endswith("/JSON/core/view/urls/")
+    assert call["params"] == {"baseurl": "http://t"}
+
+
+def test_count_urls_unexpected_payload():
+    session = FakeSession(make_response(body={"nope": 1}))
+    with pytest.raises(ZapError, match="core/view/urls"):
+        make_client(session).count_urls("http://t")

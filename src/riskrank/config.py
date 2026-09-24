@@ -43,6 +43,10 @@ class Settings:
     llm_api_key: str
     llm_model: str
     database_url: str
+    # Dashboard (Phase 3). Defaults to localhost only: the dashboard has no
+    # login yet, so exposing it on 0.0.0.0 should be a deliberate choice.
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8000
 
     def require(self, *fields: str) -> None:
         """Ensure each named field is set to a real (non-placeholder) value.
@@ -76,6 +80,16 @@ def _validate_url(name: str, value: str, schemes: tuple[str, ...]) -> None:
         )
 
 
+def _parse_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"Invalid DASHBOARD_PORT: {value!r}. Expected a number from 1 to 65535.")
+    return port
+
+
 def load_settings(env_file: str | Path = DEFAULT_ENV_FILE) -> Settings:
     """Load settings from the environment and an optional .env file.
 
@@ -84,7 +98,8 @@ def load_settings(env_file: str | Path = DEFAULT_ENV_FILE) -> Settings:
     Settings.require() for that.
 
     Raises:
-        ConfigError: if ZAP_API_URL or DATABASE_URL is malformed.
+        ConfigError: if ZAP_API_URL or DATABASE_URL is malformed, or
+            DASHBOARD_PORT isn't a valid port number.
     """
     file_values = dotenv_values(env_file) if Path(env_file).is_file() else {}
 
@@ -100,6 +115,8 @@ def load_settings(env_file: str | Path = DEFAULT_ENV_FILE) -> Settings:
         llm_api_key=get("LLM_API_KEY"),
         llm_model=get("LLM_MODEL", "claude-sonnet-4-6"),
         database_url=get("DATABASE_URL", "sqlite:///./riskrank.db"),
+        dashboard_host=get("DASHBOARD_HOST", "127.0.0.1"),
+        dashboard_port=_parse_port(get("DASHBOARD_PORT", "8000")),
     )
 
     _validate_url("ZAP_API_URL", settings.zap_api_url, ("http", "https"))

@@ -42,6 +42,9 @@ class FakeZapClient:
             on_progress(100)
         return "2"
 
+    def count_urls(self, url):
+        return getattr(self, "known_urls", 1)
+
     def get_alerts(self, url):
         self.calls.append(f"get_alerts {url}")
         return self.alerts
@@ -324,3 +327,17 @@ def test_failure_to_stop_scan_is_reported_but_not_fatal(slow_zap):
     assert result.exit_code == 0, result.output
     assert "Could not stop the active scan in ZAP" in result.output
     assert "Restart ZAP to clear it" in result.output
+
+
+@pytest.mark.parametrize(
+    ("url", "docker_hint"),
+    [("http://localhost:3000", True), ("http://host.docker.internal:3000", False)],
+)
+def test_nothing_crawled_gives_a_clear_error(fake_zap, url, docker_hint):
+    fake_zap.known_urls = 0
+    result = runner.invoke(app, ["scan", url])
+
+    assert result.exit_code == cli.EXIT_SCAN_FAILED
+    assert "crawl found no pages" in result.output
+    assert "run_active_scan" not in " ".join(fake_zap.calls)  # never attempted
+    assert ("host.docker.internal" in result.output.replace(url, "")) is docker_hint
