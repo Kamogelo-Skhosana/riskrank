@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}riskrank{% endblock %} · riskrank</title>
+  <style>
+    /* Minimal layout only; the dashboard theme comes in R042. */
+    body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 72rem; padding: 1rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #ddd; padding: .4rem .5rem; text-align: left; vertical-align: top; }
+    td.num, th.num { text-align: right; }
+    .muted { color: #666; }
+    .tier { font-weight: 600; white-space: nowrap; }
+    code { overflow-wrap: anywhere; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="{{ url_for('scan_list_page').path }}"><strong>riskrank</strong></a>
+    <span class="muted">· AI-prioritized vulnerability scans</span>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="muted">
+    <p>riskrank v{{ riskrank_version }} · <a href="/docs">API docs</a> ·
+      Only scan applications you own or are authorised to test.</p>
+  </footer>
+</body>
+</html>

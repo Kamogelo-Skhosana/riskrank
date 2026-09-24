@@ -143,6 +143,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found.")
         return detail
 
+    # HTML pages (R039-R043) are registered after the JSON routes.
+    from riskrank.dashboard.pages import router as pages_router
+
+    app.include_router(pages_router)
     return app
 
 

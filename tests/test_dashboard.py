@@ -4,6 +4,7 @@ Tickets: R035-R038
 """
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -471,3 +472,124 @@ def test_untriaged_scan_has_zero_risk(client, save):
 @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 1001}, {"limit": "x"}])
 def test_trend_rejects_invalid_limit(client, params):
     assert client.get("/scans/trend", params=params).status_code == 422
+
+
+# --- R039: scan list page -------------------------------------------------------------
+
+
+def test_scan_list_page_empty_state(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "<h1>Scan history</h1>" in response.text
+    assert "No scans yet. Run <code>riskrank scan &lt;url&gt;</code>" in response.text
+
+
+def test_scan_list_page_shows_date_target_and_top_finding(client, save):
+    scan_id = save(
+        "http://localhost:3000",
+        [
+            detailed("f1", "SQL Injection", "/rest/user/login", 9, 9),
+            detailed("f2", "Header", "/", 2, 2),
+            detailed("f3", "Info", "/"),
+        ],
+    )
+    html = client.get("/").text
+
+    assert "2026-09-20 10:00 UTC" in html
+    assert '<time datetime="2026-09-20T10:00:00+00:00">' in html
+    assert "<code>http://localhost:3000</code>" in html
+    assert "[Critical]</span>\n          SQL Injection" in html
+    assert "score 81/100" in html
+    assert "<code>/rest/user/login</code>" in html
+    assert "1 Critical · 0 High · 0 Medium · 1 Low" in html
+    assert "2 triaged" in html  # 3 findings, 2 triaged
+    assert f'href="/scans/{scan_id}"' in html
+
+
+def test_scan_list_page_untriaged_scan(client, save):
+    save("t", [detailed("f1", "Info", "/")])
+    html = client.get("/").text
+    assert "Not triaged" in html
+
+
+def test_scan_list_page_is_newest_first(client, save):
+    save("http://old", [], day=0)
+    save("http://new", [], day=5)
+    html = client.get("/").text
+    assert html.index("http://new") < html.index("http://old")
+
+
+def test_scan_list_page_escapes_untrusted_text(client, save):
+    save(
+        "http://t/<script>alert(1)</script>",
+        [detailed("f1", "<img src=x onerror=alert(1)>", "/<b>", 9, 9)],
+    )
+    html = client.get("/").text
+    assert "<script>alert(1)</script>" not in html
+    assert "<img src=x" not in html
+    assert "&lt;script&gt;" in html and "&lt;img src=x" in html
+
+
+def test_scan_list_page_filter_by_target(client, save):
+    save("http://a", [])
+    save("http://b", [])
+    html = client.get("/", params={"target": "http://b"}).text
+    assert "<code>http://b</code>" in html
+    assert "<code>http://a</code>" not in html
+    assert 'value="http://b"' in html
+    assert "1 scan of <code>http://b</code>" in html
+
+
+def test_scan_list_page_filter_with_no_matches(client, save):
+    save("http://a", [])
+    html = client.get("/", params={"target": "http://zzz"}).text
+    assert "No scans of <code>http://zzz</code> yet." in html
+
+
+def test_scan_list_page_pagination(client, save, monkeypatch):
+    monkeypatch.setattr("riskrank.dashboard.pages.PAGE_SIZE", 2)
+    for day in range(5):
+        save(f"http://t{day}", [], day=day)
+
+    first = client.get("/").text
+    assert "Page 1 of 3" in first
+    assert 'href="/?page=2" rel="next"' in first
+    assert 'rel="prev"' not in first
+    assert "http://t4" in first and "http://t2" not in first
+
+    middle = client.get("/", params={"page": 2}).text
+    assert 'href="/" rel="prev"' in middle and 'href="/?page=3" rel="next"' in middle
+
+    last = client.get("/", params={"page": 3}).text
+    assert "http://t0" in last and 'rel="next"' not in last
+
+
+def test_pagination_links_keep_the_target_filter(client, save, monkeypatch):
+    monkeypatch.setattr("riskrank.dashboard.pages.PAGE_SIZE", 1)
+    save("http://a", [], day=0)
+    save("http://a", [], day=1)
+    html = client.get("/", params={"target": "http://a"}).text
+    assert 'href="/?target=http%3A%2F%2Fa&amp;page=2"' in html
+
+
+def test_scan_list_page_rejects_invalid_page(client):
+    assert client.get("/", params={"page": 0}).status_code == 422
+
+
+def test_pages_are_not_in_the_api_docs(client):
+    assert "/" not in client.get("/openapi.json").json()["paths"]
+
+
+def test_dashboard_templates_are_shipped_with_the_package():
+    import riskrank.dashboard
+
+    templates = Path(riskrank.dashboard.__file__).parent / "templates"
+    assert (templates / "base.html").is_file()
+    assert (templates / "scans.html").is_file()
+
+
+def test_page_links_are_relative_paths(client):
+    html = client.get("/").text
+    assert 'action="/"' in html
+    assert "http://testserver" not in html

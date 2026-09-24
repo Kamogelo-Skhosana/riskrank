@@ -10,8 +10,8 @@ license = { text = "MIT" }
 riskrank = "riskrank.cli:app"
 
 [tool.setuptools.package-data]
-# Ship the Jinja2 report templates with the package (R029).
-riskrank = ["report/templates/*.j2"]
+# Ship the Jinja2 templates with the package (R029 report, R039+ dashboard).
+riskrank = ["report/templates/*.j2", "dashboard/templates/*.html"]
 
 [tool.ruff]
 line-length = 100

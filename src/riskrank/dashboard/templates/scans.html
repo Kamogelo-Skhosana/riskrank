@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Scan history{% endblock %}
+{% block content %}
+<h1>Scan history</h1>
+
+<form method="get" action="{{ url_for('scan_list_page').path }}" role="search">
+  <label for="target">Target</label>
+  <input id="target" name="target" type="url" value="{{ target }}" placeholder="http://localhost:3000" size="40">
+  <button type="submit">Filter</button>
+  {% if target %}<a href="{{ url_for('scan_list_page').path }}">Clear</a>{% endif %}
+</form>
+
+{% if scans.items %}
+<p class="muted">{{ scans.total }} scan{{ "" if scans.total == 1 else "s" }}{% if target %} of <code>{{ target }}</code>{% endif %}, newest first.</p>
+<table>
+  <thead>
+    <tr>
+      <th scope="col">Date</th>
+      <th scope="col">Target</th>
+      <th scope="col" class="num">Findings</th>
+      <th scope="col">By priority</th>
+      <th scope="col">Top priority finding</th>
+      <th scope="col"><span class="visually-hidden">Details</span></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for scan in scans.items %}
+    <tr>
+      <td><time datetime="{{ scan.scanned_at.isoformat() }}">{{ scan.scanned_at | utc }}</time></td>
+      <td><code>{{ scan.target_url }}</code></td>
+      <td class="num">{{ scan.finding_count }}{% if scan.triaged_count < scan.finding_count %}<br><span class="muted">{{ scan.triaged_count }} triaged</span>{% endif %}</td>
+      <td>
+        {% set counts = scan.tier_counts %}
+        {% if scan.triaged_count %}
+          {{ counts.Critical }} Critical · {{ counts.High }} High · {{ counts.Medium }} Medium · {{ counts.Low }} Low
+        {% else %}
+          <span class="muted">Not triaged</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if scan.top_finding %}
+          <span class="tier">[{{ scan.top_finding.priority_tier }}]</span>
+          {{ scan.top_finding.type }}
+          <span class="muted">· score {{ scan.top_finding.priority_score }}/100</span><br>
+          <code>{{ scan.top_finding.endpoint }}</code>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td><a href="/scans/{{ scan.id }}">Details</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% if page_count > 1 %}
+<nav aria-label="Pages">
+  {% if prev_url %}<a href="{{ prev_url }}" rel="prev">← Newer</a>{% endif %}
+  <span class="muted">Page {{ page }} of {{ page_count }}</span>
+  {% if next_url %}<a href="{{ next_url }}" rel="next">Older →</a>{% endif %}
+</nav>
+{% endif %}
+
+{% else %}
+  {% if target %}
+<p>No scans of <code>{{ target }}</code> yet.</p>
+  {% else %}
+<p>No scans yet. Run <code>riskrank scan &lt;url&gt;</code> and refresh this page.</p>
+  {% endif %}
+{% endif %}
+{% endblock %}
