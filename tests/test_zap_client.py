@@ -558,3 +558,32 @@ def test_non_connection_error_during_poll_still_fails_immediately():
         make_client(session).run_active_scan(
             "http://localhost:3000", sleep=clock.sleep, clock=clock
         )
+
+
+# --- Stopping scans after riskrank's time limit ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "endpoint"),
+    [
+        ("stop_spider", "/JSON/spider/action/stop/"),
+        ("stop_active_scan", "/JSON/ascan/action/stop/"),
+    ],
+)
+def test_stop_methods_call_zap(method, endpoint):
+    session = FakeSession(make_response(body={"Result": "OK"}))
+    getattr(make_client(session), method)("7")
+    [call] = session.calls
+    assert call["url"].endswith(endpoint)
+    assert call["params"] == {"scanId": "7"}
+
+
+def test_timeout_error_carries_scan_id_and_progress():
+    session = FakeSession([make_response(body={"scan": "9"}), make_response(body={"status": "55"})])
+    clock = FakeClock()
+    with pytest.raises(ZapScanTimeoutError) as exc:
+        make_client(session).run_active_scan(
+            "http://localhost:3000", poll_interval=5, timeout=10, sleep=clock.sleep, clock=clock
+        )
+    assert exc.value.scan_id == "9"
+    assert exc.value.progress == 55

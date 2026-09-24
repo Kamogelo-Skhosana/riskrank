@@ -23,7 +23,12 @@ from riskrank.report.markdown import generate_markdown_report, write_report
 from riskrank.report.persistence import get_engine, save_scan
 from riskrank.scanner.models import Finding
 from riskrank.scanner.normalizer import normalize_alerts
-from riskrank.scanner.zap_client import ZapClient, ZapError
+from riskrank.scanner.zap_client import (
+    DEFAULT_SPIDER_TIMEOUT_SECONDS,
+    ZapClient,
+    ZapError,
+    ZapScanTimeoutError,
+)
 from riskrank.triage.context import ContextConfig, ContextConfigError, load_context_config
 from riskrank.triage.llm_client import LLMClient
 from riskrank.triage.triage import triage_findings
@@ -44,8 +49,37 @@ def main() -> None:
     # single-command app and `scan` would be rejected as an extra argument.
 
 
-def run_scan(client: ZapClient, url: str) -> list[Finding]:
-    """Spider + active-scan url with ZAP and return normalized findings."""
+DEFAULT_MAX_SCAN_MINUTES = 60
+
+
+def _stop_after_timeout(
+    stop: Callable[[str], None], exc: ZapScanTimeoutError, what: str, minutes: float
+) -> None:
+    """Stop a scan that hit the time limit and warn that results are partial."""
+    try:
+        stop(exc.scan_id)
+    except ZapError as stop_exc:
+        err_console.print(
+            f"[yellow]Could not stop the {what} in ZAP ({escape(str(stop_exc))}); "
+            "it may keep running in the background. Restart ZAP to clear it.[/yellow]"
+        )
+    err_console.print(
+        f"[yellow]Warning: the {what} hit the {minutes:g}-minute limit at "
+        f"{exc.progress}% and was stopped. Continuing with what was found so far, "
+        "so results are partial. Use --max-scan-minutes to allow longer.[/yellow]",
+        soft_wrap=True,
+    )
+
+
+def run_scan(
+    client: ZapClient, url: str, max_scan_minutes: float = DEFAULT_MAX_SCAN_MINUTES
+) -> list[Finding]:
+    """Spider + active-scan url with ZAP and return normalized findings.
+
+    If the spider or the active scan runs past its time limit, it is stopped
+    in ZAP and the scan continues with the alerts found up to that point,
+    instead of throwing away a long scan's results.
+    """
     version = client.check_connection()
     console.print(f"Connected to ZAP {version}")
 
@@ -57,10 +91,22 @@ def run_scan(client: ZapClient, url: str) -> list[Finding]:
         transient=False,
     ) as progress:
         spider_task = progress.add_task("Crawling (spider)", total=100)
-        client.run_spider(url, on_progress=lambda p: progress.update(spider_task, completed=p))
+        try:
+            client.run_spider(url, on_progress=lambda p: progress.update(spider_task, completed=p))
+        except ZapScanTimeoutError as exc:
+            _stop_after_timeout(
+                client.stop_spider, exc, "crawl", DEFAULT_SPIDER_TIMEOUT_SECONDS / 60
+            )
 
         scan_task = progress.add_task("Active scan", total=100)
-        client.run_active_scan(url, on_progress=lambda p: progress.update(scan_task, completed=p))
+        try:
+            client.run_active_scan(
+                url,
+                timeout=max_scan_minutes * 60,
+                on_progress=lambda p: progress.update(scan_task, completed=p),
+            )
+        except ZapScanTimeoutError as exc:
+            _stop_after_timeout(client.stop_active_scan, exc, "active scan", max_scan_minutes)
 
     return normalize_alerts(client.get_alerts(url))
 
@@ -156,6 +202,17 @@ def scan(
             "--report", "-r", help="Also write a prioritized Markdown report to this file."
         ),
     ] = None,
+    max_scan_minutes: Annotated[
+        float,
+        typer.Option(
+            "--max-scan-minutes",
+            min=1,
+            help=(
+                "Stop the active scan after this many minutes and continue with the "
+                "findings so far."
+            ),
+        ),
+    ] = DEFAULT_MAX_SCAN_MINUTES,
     triage: Annotated[
         bool | None,
         typer.Option(
@@ -202,7 +259,7 @@ def scan(
     llm = _llm_for_scan(triage, settings)
 
     try:
-        findings = run_scan(client, url)
+        findings = run_scan(client, url, max_scan_minutes)
     except ZapError as exc:
         err_console.print(f"[red]Scan failed:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_SCAN_FAILED) from exc

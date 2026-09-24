@@ -52,7 +52,16 @@ class ZapConnectionError(ZapError):
 
 
 class ZapScanTimeoutError(ZapError):
-    """Raised when a spider/scan doesn't finish within the allowed time."""
+    """Raised when a spider/scan doesn't finish within the allowed time.
+
+    Carries the scan ID and last progress so the caller can stop the scan in
+    ZAP and carry on with the partial results collected so far.
+    """
+
+    def __init__(self, message: str, scan_id: str = "", progress: int = 0):
+        super().__init__(message)
+        self.scan_id = scan_id
+        self.progress = progress
 
 
 class ZapClient:
@@ -264,7 +273,9 @@ class ZapClient:
             if clock() >= deadline:
                 raise ZapScanTimeoutError(
                     f"ZAP {label} {scan_id} did not finish within {timeout:.0f}s "
-                    f"(last progress: {progress}%)."
+                    f"(last progress: {progress}%).",
+                    scan_id=scan_id,
+                    progress=progress,
                 )
             sleep(poll_interval)
 
@@ -325,6 +336,14 @@ class ZapClient:
         """
         body = self._request("ascan", "action", "scan", {"url": target_url, "recurse": "true"})
         return self._read_field(body, "scan", "ascan/action/scan")
+
+    def stop_spider(self, scan_id: str) -> None:
+        """Stop a running spider (e.g. after it hit riskrank's time limit)."""
+        self._request("spider", "action", "stop", {"scanId": scan_id})
+
+    def stop_active_scan(self, scan_id: str) -> None:
+        """Stop a running active scan. Alerts found so far stay available."""
+        self._request("ascan", "action", "stop", {"scanId": scan_id})
 
     def poll_active_scan(self, scan_id: str) -> int:
         """Return active scan progress for scan_id as a percentage (0-100)."""

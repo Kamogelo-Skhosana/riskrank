@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 from riskrank import cli
 from riskrank.cli import app
 from riskrank.config import ConfigError, Settings
-from riskrank.scanner.zap_client import ZapConnectionError
+from riskrank.scanner.zap_client import ZapConnectionError, ZapError, ZapScanTimeoutError
 
 runner = CliRunner()
 
@@ -30,13 +30,13 @@ class FakeZapClient:
             raise self.fail_with
         return "2.16.0"
 
-    def run_spider(self, url, on_progress=None):
+    def run_spider(self, url, on_progress=None, **kwargs):
         self.calls.append(f"run_spider {url}")
         if on_progress:
             on_progress(100)
         return "1"
 
-    def run_active_scan(self, url, on_progress=None):
+    def run_active_scan(self, url, on_progress=None, **kwargs):
         self.calls.append(f"run_active_scan {url}")
         if on_progress:
             on_progress(100)
@@ -239,3 +239,88 @@ def test_database_failure_is_a_warning_not_an_error(fake_zap, db_file, tmp_path)
     assert result.exit_code == 0, result.output
     assert "Warning: could not save the scan to the database" in result.output
     assert out.is_file()  # other outputs still written
+
+
+# --- Scan time limits: keep partial results -------------------------------------------
+
+
+class SlowZapClient(FakeZapClient):
+    """Spider and/or active scan run past riskrank's time limit."""
+
+    def __init__(self, alerts, slow=("active",), stop_fails=False):
+        super().__init__(alerts=alerts)
+        self.slow = set(slow)
+        self.stop_fails = stop_fails
+        self.timeouts: list[float | None] = []
+
+    def run_spider(self, url, on_progress=None, **kwargs):
+        self.calls.append(f"run_spider {url}")
+        if "spider" in self.slow:
+            raise ZapScanTimeoutError("spider timed out", scan_id="1", progress=40)
+        return "1"
+
+    def run_active_scan(self, url, on_progress=None, timeout=None, **kwargs):
+        self.calls.append(f"run_active_scan {url}")
+        self.timeouts.append(timeout)
+        if "active" in self.slow:
+            raise ZapScanTimeoutError("scan timed out", scan_id="2", progress=55)
+        return "2"
+
+    def _stop(self, what, scan_id):
+        self.calls.append(f"{what} {scan_id}")
+        if self.stop_fails:
+            raise ZapError("ZAP API error")
+
+    def stop_spider(self, scan_id):
+        self._stop("stop_spider", scan_id)
+
+    def stop_active_scan(self, scan_id):
+        self._stop("stop_active_scan", scan_id)
+
+
+@pytest.fixture
+def slow_zap(monkeypatch, fake_zap, sample_raw_zap_alert):
+    client = SlowZapClient([sample_raw_zap_alert])
+    monkeypatch.setattr(cli.ZapClient, "from_settings", classmethod(lambda cls, s: client))
+    return client
+
+
+def test_active_scan_timeout_keeps_partial_results(slow_zap, tmp_path):
+    out = tmp_path / "findings.json"
+    result = runner.invoke(app, ["scan", "http://localhost:3000", "-o", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert "stop_active_scan 2" in slow_zap.calls
+    assert slow_zap.calls[-1] == "get_alerts http://localhost:3000"  # alerts still fetched
+    assert "active scan hit the 60-minute limit at 55%" in result.output
+    assert "results are partial" in result.output
+    assert json.loads(out.read_text(encoding="utf-8"))["finding_count"] == 1
+
+
+def test_spider_timeout_is_stopped_and_active_scan_still_runs(slow_zap):
+    slow_zap.slow = {"spider"}
+    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    assert result.exit_code == 0, result.output
+    assert slow_zap.calls.index("stop_spider 1") < slow_zap.calls.index(
+        "run_active_scan http://localhost:3000"
+    )
+    assert "crawl hit the 10-minute limit at 40%" in result.output
+
+
+def test_max_scan_minutes_sets_the_active_scan_timeout(slow_zap):
+    slow_zap.slow = set()
+    runner.invoke(app, ["scan", "http://localhost:3000", "--max-scan-minutes", "120"])
+    assert slow_zap.timeouts == [7200]
+
+
+def test_max_scan_minutes_must_be_positive(slow_zap):
+    result = runner.invoke(app, ["scan", "http://localhost:3000", "--max-scan-minutes", "0"])
+    assert result.exit_code != 0
+
+
+def test_failure_to_stop_scan_is_reported_but_not_fatal(slow_zap):
+    slow_zap.stop_fails = True
+    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    assert result.exit_code == 0, result.output
+    assert "Could not stop the active scan in ZAP" in result.output
+    assert "Restart ZAP to clear it" in result.output

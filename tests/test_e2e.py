@@ -47,11 +47,11 @@ class FakeZap:
     def check_connection(self):
         return "2.17.0"
 
-    def run_spider(self, url, on_progress=None):
+    def run_spider(self, url, on_progress=None, **kwargs):
         on_progress and on_progress(100)
         return "1"
 
-    def run_active_scan(self, url, on_progress=None):
+    def run_active_scan(self, url, on_progress=None, **kwargs):
         on_progress and on_progress(100)
         return "2"
 
