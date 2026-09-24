@@ -74,7 +74,7 @@ def test_help_lists_scan_command():
 
 def test_scan_runs_pipeline_and_prints_findings(fake_zap):
     """`riskrank scan <url>` must be accepted as a subcommand and run end to end."""
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
 
     assert result.exit_code == 0, result.output
     assert fake_zap.calls == [
@@ -90,14 +90,14 @@ def test_scan_runs_pipeline_and_prints_findings(fake_zap):
 
 def test_scan_with_no_alerts(fake_zap):
     fake_zap.alerts = []
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
     assert result.exit_code == 0
     assert "No findings." in result.output
 
 
 def test_scan_zap_failure_exits_with_error(fake_zap):
     fake_zap.fail_with = ZapConnectionError("Could not reach ZAP. Is ZAP running?")
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
     assert result.exit_code == cli.EXIT_SCAN_FAILED
     assert "Scan failed" in result.output
     assert "Is ZAP running?" in result.output
@@ -108,14 +108,14 @@ def test_scan_config_error_exits_with_config_code(monkeypatch):
         raise ConfigError("Missing required configuration: ZAP_API_KEY.")
 
     monkeypatch.setattr(cli, "load_settings", bad_settings)
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
     assert result.exit_code == cli.EXIT_CONFIG_ERROR
     assert "ZAP_API_KEY" in result.output
 
 
 def test_scan_output_writes_json(fake_zap, tmp_path):
     out = tmp_path / "findings.json"
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "--output", str(out)])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "--output", str(out)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(out.read_text(encoding="utf-8"))
@@ -127,14 +127,14 @@ def test_scan_output_writes_json(fake_zap, tmp_path):
 
 def test_scan_short_output_flag(fake_zap, tmp_path):
     out = tmp_path / "f.json"
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "-o", str(out)])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "-o", str(out)])
     assert result.exit_code == 0
     assert out.is_file()
 
 
 def test_scan_without_output_writes_no_file(fake_zap, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "--no-save"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "--no-save"])
     assert result.exit_code == 0
     assert list(tmp_path.iterdir()) == []
 
@@ -143,7 +143,7 @@ def test_scan_output_write_failure_exits_with_error(fake_zap, tmp_path):
     blocker = tmp_path / "a-file"
     blocker.write_text("not a directory")
     result = runner.invoke(
-        app, ["scan", "http://localhost:3000", "--output", str(blocker / "f.json")]
+        app, ["scan", "--yes", "http://localhost:3000", "--output", str(blocker / "f.json")]
     )
     assert result.exit_code == cli.EXIT_SCAN_FAILED
     assert "Could not write JSON output" in result.output
@@ -152,7 +152,7 @@ def test_scan_output_write_failure_exits_with_error(fake_zap, tmp_path):
 def test_scan_with_valid_context_file(fake_zap, tmp_path):
     ctx = tmp_path / "context.toml"
     ctx.write_text('[[endpoints]]\npattern = "/api/*"\nrequires_auth = true\n', encoding="utf-8")
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "--context", str(ctx)])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "--context", str(ctx)])
     assert result.exit_code == 0, result.output
     assert "Using target context from" in result.output
     assert "(1 endpoint rule(s))" in result.output
@@ -161,7 +161,7 @@ def test_scan_with_valid_context_file(fake_zap, tmp_path):
 def test_scan_with_invalid_context_file_fails_before_scanning(fake_zap, tmp_path):
     ctx = tmp_path / "context.toml"
     ctx.write_text("[default]\nrequires_login = true\n", encoding="utf-8")
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "-c", str(ctx)])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "-c", str(ctx)])
     assert result.exit_code == cli.EXIT_CONFIG_ERROR
     assert "Context file error" in result.output
     assert fake_zap.calls == []  # never started the scan
@@ -169,7 +169,7 @@ def test_scan_with_invalid_context_file_fails_before_scanning(fake_zap, tmp_path
 
 def test_scan_report_writes_markdown(fake_zap, tmp_path):
     out = tmp_path / "report.md"
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "--report", str(out)])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "--report", str(out)])
 
     assert result.exit_code == 0, result.output
     content = out.read_text(encoding="utf-8")
@@ -185,6 +185,7 @@ def test_scan_short_report_flag_with_json_output(fake_zap, tmp_path):
         app,
         [
             "scan",
+            "--yes",
             "http://localhost:3000",
             "-r",
             str(tmp_path / "r.md"),
@@ -201,7 +202,7 @@ def test_scan_report_write_failure_exits_with_error(fake_zap, tmp_path):
     blocker = tmp_path / "a-file"
     blocker.write_text("not a directory")
     result = runner.invoke(
-        app, ["scan", "http://localhost:3000", "--report", str(blocker / "report.md")]
+        app, ["scan", "--yes", "http://localhost:3000", "--report", str(blocker / "report.md")]
     )
     assert result.exit_code == cli.EXIT_SCAN_FAILED
     assert "Could not write Markdown report" in result.output
@@ -210,7 +211,7 @@ def test_scan_report_write_failure_exits_with_error(fake_zap, tmp_path):
 def test_scan_saves_to_database_by_default(fake_zap, db_file):
     from riskrank.report.persistence import get_engine, load_scan
 
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
 
     assert result.exit_code == 0, result.output
     assert "Saved scan #1 to the database" in result.output
@@ -223,13 +224,13 @@ def test_scan_saves_to_database_by_default(fake_zap, db_file):
 
 
 def test_each_scan_gets_a_new_id(fake_zap):
-    runner.invoke(app, ["scan", "http://localhost:3000"])
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
     assert "Saved scan #2 to the database" in result.output
 
 
 def test_no_save_skips_the_database(fake_zap, db_file):
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "--no-save"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "--no-save"])
     assert result.exit_code == 0
     assert "Saved scan" not in result.output
     assert not db_file.exists()
@@ -238,7 +239,7 @@ def test_no_save_skips_the_database(fake_zap, db_file):
 def test_database_failure_is_a_warning_not_an_error(fake_zap, db_file, tmp_path):
     db_file.mkdir()  # a directory where the database file should be
     out = tmp_path / "findings.json"
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "-o", str(out)])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "-o", str(out)])
     assert result.exit_code == 0, result.output
     assert "Warning: could not save the scan to the database" in result.output
     assert out.is_file()  # other outputs still written
@@ -290,7 +291,7 @@ def slow_zap(monkeypatch, fake_zap, sample_raw_zap_alert):
 
 def test_active_scan_timeout_keeps_partial_results(slow_zap, tmp_path):
     out = tmp_path / "findings.json"
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "-o", str(out)])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "-o", str(out)])
 
     assert result.exit_code == 0, result.output
     assert "stop_active_scan 2" in slow_zap.calls
@@ -302,7 +303,7 @@ def test_active_scan_timeout_keeps_partial_results(slow_zap, tmp_path):
 
 def test_spider_timeout_is_stopped_and_active_scan_still_runs(slow_zap):
     slow_zap.slow = {"spider"}
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
     assert result.exit_code == 0, result.output
     assert slow_zap.calls.index("stop_spider 1") < slow_zap.calls.index(
         "run_active_scan http://localhost:3000"
@@ -312,18 +313,20 @@ def test_spider_timeout_is_stopped_and_active_scan_still_runs(slow_zap):
 
 def test_max_scan_minutes_sets_the_active_scan_timeout(slow_zap):
     slow_zap.slow = set()
-    runner.invoke(app, ["scan", "http://localhost:3000", "--max-scan-minutes", "120"])
+    runner.invoke(app, ["scan", "--yes", "http://localhost:3000", "--max-scan-minutes", "120"])
     assert slow_zap.timeouts == [7200]
 
 
 def test_max_scan_minutes_must_be_positive(slow_zap):
-    result = runner.invoke(app, ["scan", "http://localhost:3000", "--max-scan-minutes", "0"])
+    result = runner.invoke(
+        app, ["scan", "--yes", "http://localhost:3000", "--max-scan-minutes", "0"]
+    )
     assert result.exit_code != 0
 
 
 def test_failure_to_stop_scan_is_reported_but_not_fatal(slow_zap):
     slow_zap.stop_fails = True
-    result = runner.invoke(app, ["scan", "http://localhost:3000"])
+    result = runner.invoke(app, ["scan", "--yes", "http://localhost:3000"])
     assert result.exit_code == 0, result.output
     assert "Could not stop the active scan in ZAP" in result.output
     assert "Restart ZAP to clear it" in result.output
@@ -335,7 +338,7 @@ def test_failure_to_stop_scan_is_reported_but_not_fatal(slow_zap):
 )
 def test_nothing_crawled_gives_a_clear_error(fake_zap, url, docker_hint):
     fake_zap.known_urls = 0
-    result = runner.invoke(app, ["scan", url])
+    result = runner.invoke(app, ["scan", "--yes", url])
 
     assert result.exit_code == cli.EXIT_SCAN_FAILED
     assert "crawl found no pages" in result.output

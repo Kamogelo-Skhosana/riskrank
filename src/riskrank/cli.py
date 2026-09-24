@@ -4,7 +4,7 @@ Usage:
     riskrank scan <url>     scan a target, triage and report the findings
     riskrank serve          run the web dashboard for saved scans
 
-Tickets: R015, R016, R017, R019, R031, R033, R034, R035
+Tickets: R015, R016, R017, R019, R031, R033, R034, R035, R044
 """
 
 from collections.abc import Callable
@@ -19,6 +19,7 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 from sqlalchemy.exc import SQLAlchemyError
 
 from riskrank.config import ConfigError, Settings, load_settings
+from riskrank.dashboard.safeguard import OWNERSHIP_WARNING, confirm_target_ownership
 from riskrank.report.console import print_findings
 from riskrank.report.json_export import export_json
 from riskrank.report.markdown import generate_markdown_report, write_report
@@ -41,6 +42,7 @@ err_console = Console(stderr=True)
 
 EXIT_SCAN_FAILED = 1
 EXIT_CONFIG_ERROR = 2
+EXIT_NOT_CONFIRMED = 3
 
 
 @app.callback()
@@ -146,6 +148,26 @@ def _load_target_context(path: Path | None) -> ContextConfig | None:
     return config
 
 
+def _require_ownership_confirmation(url: str, yes: bool) -> None:
+    """Stop unless the user confirms they may scan url (R044). Runs before
+    any settings are loaded or anything is sent to ZAP or the target."""
+    if not yes:
+        err_console.print(f"[yellow]{OWNERSHIP_WARNING}[/yellow]", soft_wrap=True)
+    result = confirm_target_ownership(url, assume_yes=yes)
+    if result.confirmed:
+        return
+    if result.method == "non-interactive":
+        err_console.print(
+            "[red]Scan refused:[/red] no one confirmed that you may test this target. "
+            "Run interactively to answer the prompt, or pass --yes if you own it or "
+            "have permission.",
+            soft_wrap=True,
+        )
+    else:
+        err_console.print("[red]Scan cancelled:[/red] target ownership not confirmed.")
+    raise typer.Exit(EXIT_NOT_CONFIRMED)
+
+
 def _llm_for_scan(triage: bool | None, settings: Settings) -> LLMClient | None:
     """Decide whether this scan runs AI triage.
 
@@ -220,6 +242,17 @@ def scan(
             "--report", "-r", help="Also write a prioritized Markdown report to this file."
         ),
     ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help=(
+                "Confirm you own the target or have written permission to test it, "
+                "skipping the prompt (for scripts). You are responsible for this."
+            ),
+        ),
+    ] = False,
     max_scan_minutes: Annotated[
         float,
         typer.Option(
@@ -263,6 +296,7 @@ def scan(
 ):
     """Scan URL with ZAP, AI-triage the findings, and print/save the results."""
     console.print(f"[bold]riskrank[/bold] scanning {escape(url)}")
+    _require_ownership_confirmation(url, yes)
 
     try:
         settings = load_settings()

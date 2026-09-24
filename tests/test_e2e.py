@@ -114,6 +114,7 @@ def run(pipeline, *extra):
         app,
         [
             "scan",
+            "--yes",
             "http://example-target.com",
             "-c",
             str(EXAMPLE_CONTEXT),
@@ -186,7 +187,7 @@ def test_triage_required_without_api_key_fails_before_scanning(monkeypatch, tmp_
         "from_settings",
         classmethod(lambda cls, s: zap_used.append(1) or FakeZap([])),
     )
-    result = runner.invoke(app, ["scan", "http://example-target.com", "--triage"])
+    result = runner.invoke(app, ["scan", "--yes", "http://example-target.com", "--triage"])
     assert result.exit_code == cli.EXIT_CONFIG_ERROR
     assert "LLM_API_KEY" in result.output
 
@@ -197,7 +198,7 @@ def test_default_without_api_key_scans_but_skips_triage(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli.ZapClient, "from_settings", classmethod(lambda cls, s: FakeZap(SAMPLE_ALERTS))
     )
-    result = runner.invoke(app, ["scan", "http://example-target.com", "--no-save"])
+    result = runner.invoke(app, ["scan", "--yes", "http://example-target.com", "--no-save"])
     assert result.exit_code == 0, result.output
     assert "AI triage skipped: set LLM_API_KEY" in result.output
     assert "Raw findings (3)" in result.output
