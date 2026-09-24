@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}Risk trend{% endblock %}
+{% block head %}
+<style>
+  /* Chart tokens (dataviz reference palette); dark steps chosen for the dark surface. */
+  .viz-root {
+    color-scheme: light;
+    --surface-1: #fcfcfb; --text-primary: #0b0b0b; --text-secondary: #52514e;
+    --text-muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --series-1: #2a78d6;
+    --good: #006300; --bad: #d03b3b; --border: rgba(11,11,11,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+      --text-muted: #898781; --grid: #2c2c2a; --axis: #383835; --series-1: #3987e5;
+      --good: #0ca30c; --bad: #e66767; --border: rgba(255,255,255,0.10);
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1: #1a1a19; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+    --text-muted: #898781; --grid: #2c2c2a; --axis: #383835; --series-1: #3987e5;
+    --good: #0ca30c; --bad: #e66767; --border: rgba(255,255,255,0.10);
+  }
+  .viz-root { background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .tiles { display: flex; gap: 2rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .tile-label { color: var(--text-secondary); font-size: .875rem; }
+  .tile-value { font-size: 2rem; font-weight: 600; }
+  .delta { font-size: .875rem; color: var(--text-secondary); }
+  .delta.down { color: var(--good); }   /* lower risk is good */
+  .delta.up { color: var(--bad); }
+  .chart { position: relative; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .grid line { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--axis); stroke-width: 1; }
+  .tick { fill: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .area { fill: var(--series-1); opacity: .1; }
+  .dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
+  .dot:focus { outline: none; stroke: var(--text-primary); }
+  .end-label { fill: var(--text-primary); font-size: 12px; font-weight: 600; }
+  .crosshair { stroke: var(--text-muted); stroke-width: 1; visibility: hidden; }
+  .tooltip { position: absolute; pointer-events: none; visibility: hidden; background: var(--surface-1); color: var(--text-primary);
+             border: 1px solid var(--border); border-radius: 6px; padding: .4rem .6rem; font-size: .8125rem; white-space: nowrap;
+             box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .tooltip strong { font-size: 1rem; }
+  .tooltip .key { display: inline-block; width: 12px; height: 2px; background: var(--series-1); vertical-align: middle; margin-right: .3rem; }
+</style>
+{% endblock %}
+{% block content %}
+<h1>Risk trend</h1>
+
+{% if targets %}
+<form method="get" action="{{ url_for('trend_page').path }}" class="filters">
+  <label for="target">Target</label>
+  <select id="target" name="target">
+    {% for t in targets %}<option value="{{ t }}"{% if t == selected %} selected{% endif %}>{{ t }}</option>{% endfor %}
+  </select>
+  <button type="submit">Show</button>
+</form>
+{% endif %}
+
+{% if points %}
+<section class="viz-root" aria-labelledby="chart-title">
+  <div class="tiles">
+    <div>
+      <div class="tile-label">Latest risk score</div>
+      <div class="tile-value">{{ latest.risk_score }}</div>
+      {% if latest.change is not none %}
+      <div class="delta {{ 'down' if latest.change < 0 else ('up' if latest.change > 0 else '') }}">
+        {% if latest.change < 0 %}▼ {{ -latest.change }} lower{% elif latest.change > 0 %}▲ {{ latest.change }} higher{% else %}No change{% endif %}
+        than the previous scan
+      </div>
+      {% endif %}
+    </div>
+    <div>
+      <div class="tile-label">Critical + High findings (latest)</div>
+      <div class="tile-value">{{ latest.tier_counts.Critical + latest.tier_counts.High }}</div>
+    </div>
+    <div>
+      <div class="tile-label">Scans</div>
+      <div class="tile-value">{{ points | length }}</div>
+    </div>
+  </div>
+
+  <h2 id="chart-title">Risk score of <code>{{ selected }}</code> over time</h2>
+  <p class="tile-label">Sum of each distinct issue's highest priority score. Lower is better.</p>
+
+  <figure class="chart" id="trend-chart">
+    <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img"
+         aria-label="Line chart of risk score over {{ points | length }} scan{{ '' if points | length == 1 else 's' }}; latest {{ latest.risk_score }}. Values are in the table below.">
+      <g class="grid">
+        {% for y, value in chart.y_ticks %}
+        <line x1="{{ chart.plot_left }}" x2="{{ chart.plot_right }}" y1="{{ y }}" y2="{{ y }}"></line>
+        <text class="tick" x="{{ chart.plot_left - 8 }}" y="{{ y + 4 }}" text-anchor="end">{{ "{:,}".format(value) }}</text>
+        {% endfor %}
+      </g>
+      <line class="baseline" x1="{{ chart.plot_left }}" x2="{{ chart.plot_right }}" y1="{{ chart.plot_bottom }}" y2="{{ chart.plot_bottom }}"></line>
+      {% for x, text, anchor in chart.x_labels %}
+      <text class="tick" x="{{ x }}" y="{{ chart.plot_bottom + 20 }}" text-anchor="{{ anchor }}">{{ text }}</text>
+      {% endfor %}
+      {% if chart.dots | length > 1 %}
+      <path class="area" d="{{ chart.area_path }}"></path>
+      <path class="line" d="{{ chart.line_path }}"></path>
+      {% endif %}
+      <line class="crosshair" y1="{{ chart.plot_top }}" y2="{{ chart.plot_bottom }}"></line>
+      {% for dot in chart.dots %}
+      <circle class="dot" cx="{{ dot.x }}" cy="{{ dot.y }}" r="4" tabindex="0" data-index="{{ loop.index0 }}"
+              aria-label="{{ dot.point.scanned_at | utc }}: risk score {{ dot.point.risk_score }}"></circle>
+      {% endfor %}
+      {% set last = chart.dots[-1] %}
+      <text class="end-label" x="{{ last.x + 10 }}" y="{{ last.y + 4 }}">{{ last.point.risk_score }}</text>
+      <rect class="hit" x="{{ chart.plot_left }}" y="{{ chart.plot_top }}" width="{{ chart.plot_right - chart.plot_left }}"
+            height="{{ chart.plot_bottom - chart.plot_top }}" fill="transparent"></rect>
+    </svg>
+    <div class="tooltip" role="status" aria-live="polite"></div>
+  </figure>
+</section>
+
+<h2>Scans</h2>
+<table>
+  <thead>
+    <tr>
+      <th scope="col">Date</th>
+      <th scope="col" class="num">Risk score</th>
+      <th scope="col" class="num">Change</th>
+      <th scope="col" class="num">Issues</th>
+      <th scope="col">By priority</th>
+      <th scope="col"><span class="visually-hidden">Details</span></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for p in points | reverse %}
+    <tr>
+      <td><time datetime="{{ p.scanned_at.isoformat() }}">{{ p.scanned_at | utc }}</time></td>
+      <td class="num">{{ p.risk_score }}</td>
+      <td class="num">{% if p.change is none %}—{% elif p.change > 0 %}+{{ p.change }}{% else %}{{ p.change }}{% endif %}</td>
+      <td class="num">{{ p.issue_count }}</td>
+      <td>{% if p.triaged_count %}{{ p.tier_counts.Critical }} Critical · {{ p.tier_counts.High }} High · {{ p.tier_counts.Medium }} Medium · {{ p.tier_counts.Low }} Low{% else %}<span class="muted">Not triaged</span>{% endif %}</td>
+      <td><a href="{{ url_for('scan_detail_page', scan_id=p.scan_id).path }}">Details</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<script>
+(function () {
+  // Tooltip + crosshair. Values come from the server as JSON and are inserted with
+  // textContent only, so nothing from the database can become HTML.
+  const data = {{ tooltip_data | tojson }};
+  const figure = document.getElementById("trend-chart");
+  const svg = figure.querySelector("svg");
+  const tooltip = figure.querySelector(".tooltip");
+  const crosshair = svg.querySelector(".crosshair");
+  const dots = Array.from(svg.querySelectorAll(".dot"));
+
+  function row(parent, text, strong) {
+    const el = document.createElement(strong ? "strong" : "div");
+    el.textContent = text;
+    parent.appendChild(el);
+    return el;
+  }
+
+  function show(i) {
+    const d = data[i], dot = dots[i];
+    const x = Number(dot.getAttribute("cx")), y = Number(dot.getAttribute("cy"));
+    crosshair.setAttribute("x1", x); crosshair.setAttribute("x2", x);
+    crosshair.style.visibility = "visible";
+    tooltip.replaceChildren();
+    const head = document.createElement("div");
+    const key = document.createElement("span"); key.className = "key";
+    head.appendChild(key);
+    row(head, String(d.risk), true);
+    head.appendChild(document.createTextNode(" risk score"));
+    tooltip.appendChild(head);
+    if (d.change !== null) row(tooltip, (d.change > 0 ? "+" : "") + d.change + " vs previous scan");
+    row(tooltip, d.issues + " issues · " + d.critical + " Critical · " + d.high + " High");
+    row(tooltip, d.date);
+    const scale = svg.getBoundingClientRect().width / svg.viewBox.baseVal.width;
+    const left = Math.min(x * scale + 12, figure.clientWidth - tooltip.offsetWidth - 4);
+    tooltip.style.left = Math.max(0, left) + "px";
+    tooltip.style.top = Math.max(0, y * scale - 16) + "px";
+    tooltip.style.visibility = "visible";
+  }
+
+  function hide() {
+    crosshair.style.visibility = "hidden";
+    tooltip.style.visibility = "hidden";
+  }
+
+  svg.addEventListener("pointermove", function (event) {
+    const pt = svg.createSVGPoint(); pt.x = event.clientX; pt.y = event.clientY;
+    const x = pt.matrixTransform(svg.getScreenCTM().inverse()).x;
+    let best = 0;
+    dots.forEach(function (dot, i) {
+      if (Math.abs(dot.getAttribute("cx") - x) < Math.abs(dots[best].getAttribute("cx") - x)) best = i;
+    });
+    show(best);
+  });
+  svg.addEventListener("pointerleave", hide);
+  dots.forEach(function (dot, i) {
+    dot.addEventListener("focus", function () { show(i); });
+    dot.addEventListener("blur", hide);
+  });
+})();
+</script>
+{% elif targets %}
+<p>No scans of <code>{{ selected }}</code> yet.</p>
+{% else %}
+<p>No scans yet. Run <code>riskrank scan &lt;url&gt;</code> and refresh this page.</p>
+{% endif %}
+{% endblock %}

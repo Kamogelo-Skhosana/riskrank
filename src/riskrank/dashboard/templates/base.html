@@ -15,11 +15,16 @@
     code { overflow-wrap: anywhere; }
     .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   </style>
+  {% block head %}{% endblock %}
 </head>
 <body>
   <header>
     <a href="{{ url_for('scan_list_page').path }}"><strong>riskrank</strong></a>
     <span class="muted">· AI-prioritized vulnerability scans</span>
+    <nav aria-label="Main">
+      <a href="{{ url_for('scan_list_page').path }}">Scans</a> ·
+      <a href="{{ url_for('trend_page').path }}">Risk trend</a>
+    </nav>
   </header>
   <main>
     {% block content %}{% endblock %}

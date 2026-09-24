@@ -14,6 +14,8 @@ from riskrank import __version__, cli
 from riskrank.cli import app as cli_app
 from riskrank.config import ConfigError, Settings
 from riskrank.dashboard.api import MAX_PAGE_SIZE, create_app
+from riskrank.dashboard.pages import build_trend_chart, nice_ceiling
+from riskrank.dashboard.schemas import TierCounts, TrendPoint
 from riskrank.report.persistence import get_engine, save_scan
 from riskrank.scanner.models import Finding
 
@@ -701,3 +703,151 @@ def test_scan_detail_page_escapes_untrusted_text(client, save):
 def test_external_links_open_safely(client, juice_scan):
     html = client.get(f"/scan/{juice_scan}").text
     assert 'rel="noopener noreferrer" target="_blank"' in html
+
+
+# --- R041: risk trend page -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(0, 4), (1, 4), (4, 4), (5, 8), (9, 12), (30, 40), (90, 100), (121, 200), (1000, 1000)],
+)
+def test_nice_ceiling(value, expected):
+    top = nice_ceiling(value)
+    assert top == expected
+    assert top >= value and top % 4 == 0
+
+
+def trend_point(scan_id, day, risk):
+    return TrendPoint(
+        scan_id=scan_id,
+        target_url="t",
+        scanned_at=T0 + timedelta(days=day),
+        finding_count=1,
+        triaged_count=1,
+        issue_count=1,
+        risk_score=risk,
+        max_score=risk,
+        tier_counts=TierCounts(),
+        change=None,
+    )
+
+
+def test_trend_chart_geometry():
+    chart = build_trend_chart(
+        [trend_point(1, 0, 100), trend_point(2, 10, 0), trend_point(3, 20, 50)]
+    )
+    assert chart.y_ticks[0] == (chart.plot_bottom, 0)
+    assert chart.y_ticks[-1] == (chart.plot_top, 100)
+    xs = [d.x for d in chart.dots]
+    assert xs[0] == chart.plot_left and xs[-1] == chart.plot_right
+    assert xs[1] == pytest.approx((chart.plot_left + chart.plot_right) / 2)  # time-proportional
+    ys = [d.y for d in chart.dots]
+    assert ys[0] == chart.plot_top and ys[1] == chart.plot_bottom
+    assert chart.line_path.startswith(f"M{xs[0]},{ys[0]} L")
+    assert chart.area_path.endswith("Z")
+    assert [label[2] for label in chart.x_labels] == ["start", "end"]
+
+
+def test_trend_chart_uneven_time_gaps_are_honest():
+    chart = build_trend_chart([trend_point(1, 0, 5), trend_point(2, 1, 5), trend_point(3, 10, 5)])
+    xs = [d.x for d in chart.dots]
+    assert (xs[1] - xs[0]) < (xs[2] - xs[1]) / 5
+
+
+def test_trend_chart_single_point_is_centred():
+    chart = build_trend_chart([trend_point(1, 0, 30)])
+    [dot] = chart.dots
+    assert dot.x == pytest.approx((chart.plot_left + chart.plot_right) / 2)
+    assert [label[2] for label in chart.x_labels] == ["middle"]
+
+
+def test_trend_chart_same_instant_uses_even_spacing():
+    chart = build_trend_chart([trend_point(1, 0, 5), trend_point(2, 0, 5), trend_point(3, 0, 5)])
+    xs = [d.x for d in chart.dots]
+    assert xs == sorted(xs) and len(set(xs)) == 3
+
+
+def test_trend_chart_no_points():
+    assert build_trend_chart([]) is None
+
+
+def test_trend_page_empty_state(client):
+    html = client.get("/trend").text
+    assert "<h1>Risk trend</h1>" in html
+    assert "No scans yet." in html
+    assert "<svg" not in html
+
+
+def test_trend_page_defaults_to_most_recent_target(client, save):
+    save("http://old", [detailed("f1", "A", "/", 5, 5)], day=0)
+    save("http://new", [detailed("f1", "A", "/", 9, 9)], day=0)
+    save("http://new", [detailed("f1", "A", "/", 2, 2)], day=3)
+    html = client.get("/trend").text
+
+    assert "Risk score of <code>http://new</code> over time" in html
+    assert '<option value="http://new" selected>' in html
+    assert '<option value="http://old">' in html
+    assert html.index('value="http://new"') < html.index('value="http://old"')
+    # Latest value tile + change vs previous scan (lower risk is good)
+    assert '<div class="tile-value">4</div>' in html
+    assert "▼ 77 lower" in html and 'class="delta down"' in html
+    # Chart: two points, line + area, direct end label, accessible description
+    assert html.count('class="dot"') == 2
+    assert '<path class="line"' in html and '<path class="area"' in html
+    assert 'class="end-label"' in html
+    assert 'role="img"' in html and "Values are in the table below." in html
+    # Table view: newest first, with links to the detail pages
+    rows = html.split("<tbody>")[-1]
+    assert rows.index("2026-09-23 10:00 UTC") < rows.index("2026-09-20 10:00 UTC")
+    assert 'href="/scan/' in rows
+
+
+def test_trend_page_select_target(client, save):
+    save("http://a", [detailed("f1", "A", "/", 5, 5)], day=0)
+    save("http://b", [], day=1)
+    html = client.get("/trend", params={"target": "http://a"}).text
+    assert "Risk score of <code>http://a</code>" in html
+    assert '<div class="tile-value">25</div>' in html
+
+
+def test_trend_page_unknown_target(client, save):
+    save("http://a", [], day=0)
+    assert (
+        "No scans of <code>http://zzz</code> yet."
+        in client.get("/trend", params={"target": "http://zzz"}).text
+    )
+
+
+def test_trend_page_risk_increase_is_flagged(client, save):
+    save("t", [detailed("f1", "A", "/", 2, 2)], day=0)
+    save("t", [detailed("f1", "A", "/", 9, 9)], day=1)
+    html = client.get("/trend").text
+    assert "▲ 77 higher" in html and 'class="delta up"' in html
+
+
+def test_trend_page_single_scan_has_no_line(client, save):
+    save("t", [detailed("f1", "A", "/", 5, 5)])
+    html = client.get("/trend").text
+    assert html.count('class="dot"') == 1
+    assert '<path class="line"' not in html
+    assert "than the previous scan" not in html
+
+
+def test_trend_page_escapes_target_everywhere(client, save):
+    evil = "http://t/</script><script>alert(1)</script>"
+    save(evil, [detailed("f1", "A", "/", 5, 5)])
+    html = client.get("/trend").text
+    assert "<script>alert(1)</script>" not in html
+    assert html.count("</script>") == 1  # only the page's own script tag
+
+
+def test_trend_page_tooltip_data_is_json(client, save):
+    save("t", [detailed("f1", "A", "/", 5, 5)])
+    html = client.get("/trend").text
+    assert 'const data = [{"change": null, "critical": 0, "date": "2026-09-20 10:00 UTC"' in html
+    assert "innerHTML" not in html  # tooltip uses textContent only
+
+
+def test_navigation_links_to_trend(client):
+    assert 'href="/trend">Risk trend</a>' in client.get("/").text
