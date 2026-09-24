@@ -4,7 +4,7 @@ Usage:
     riskrank scan <url>     scan a target, triage and report the findings
     riskrank serve          run the web dashboard for saved scans
 
-Tickets: R015, R016, R017, R019, R031, R033, R034, R035, R044
+Tickets: R015, R016, R017, R019, R031, R033, R034, R035, R044, R045
 """
 
 from collections.abc import Callable
@@ -19,7 +19,11 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 from sqlalchemy.exc import SQLAlchemyError
 
 from riskrank.config import ConfigError, Settings, load_settings
-from riskrank.dashboard.safeguard import OWNERSHIP_WARNING, confirm_target_ownership
+from riskrank.dashboard.safeguard import (
+    OWNERSHIP_WARNING,
+    confirm_target_ownership,
+    is_target_allowed,
+)
 from riskrank.report.console import print_findings
 from riskrank.report.json_export import export_json
 from riskrank.report.markdown import generate_markdown_report, write_report
@@ -43,6 +47,7 @@ err_console = Console(stderr=True)
 EXIT_SCAN_FAILED = 1
 EXIT_CONFIG_ERROR = 2
 EXIT_NOT_CONFIRMED = 3
+EXIT_NOT_ALLOWED = 4
 
 
 @app.callback()
@@ -300,6 +305,21 @@ def scan(
 
     try:
         settings = load_settings()
+    except ConfigError as exc:
+        err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")
+        raise typer.Exit(EXIT_CONFIG_ERROR) from exc
+
+    if not is_target_allowed(url, settings.scan_allowlist):
+        allowed = ", ".join(settings.scan_allowlist) or "(any http/https URL)"
+        err_console.print(
+            f"[red]Scan refused:[/red] {escape(url)} is not on the scan allowlist. "
+            f"Allowed: {escape(allowed)}. Add the host to SCAN_ALLOWLIST in .env if you "
+            "own it or have permission to test it.",
+            soft_wrap=True,
+        )
+        raise typer.Exit(EXIT_NOT_ALLOWED)
+
+    try:
         client = ZapClient.from_settings(settings)
     except ConfigError as exc:
         err_console.print(f"[red]Configuration error:[/red] {escape(str(exc))}")

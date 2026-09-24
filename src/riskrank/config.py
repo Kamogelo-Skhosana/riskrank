@@ -10,7 +10,7 @@ Ticket: R011
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -47,6 +47,9 @@ class Settings:
     # login yet, so exposing it on 0.0.0.0 should be a deliberate choice.
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8000
+    # Hosts riskrank may scan (R045). Empty = no restriction beyond the
+    # ownership confirmation. See riskrank.dashboard.safeguard.AllowlistEntry.
+    scan_allowlist: list[str] = field(default_factory=list)
 
     def require(self, *fields: str) -> None:
         """Ensure each named field is set to a real (non-placeholder) value.
@@ -90,6 +93,15 @@ def _parse_port(value: str) -> int:
     return port
 
 
+def _parse_allowlist(value: str) -> list[str]:
+    from riskrank.dashboard.safeguard import AllowlistError, parse_allowlist
+
+    try:
+        return [entry.raw for entry in parse_allowlist(value)]
+    except AllowlistError as exc:
+        raise ConfigError(f"SCAN_ALLOWLIST: {exc}") from exc
+
+
 def load_settings(env_file: str | Path = DEFAULT_ENV_FILE) -> Settings:
     """Load settings from the environment and an optional .env file.
 
@@ -98,8 +110,9 @@ def load_settings(env_file: str | Path = DEFAULT_ENV_FILE) -> Settings:
     Settings.require() for that.
 
     Raises:
-        ConfigError: if ZAP_API_URL or DATABASE_URL is malformed, or
-            DASHBOARD_PORT isn't a valid port number.
+        ConfigError: if ZAP_API_URL or DATABASE_URL is malformed,
+            DASHBOARD_PORT isn't a valid port number, or SCAN_ALLOWLIST has
+            an entry that can't be parsed.
     """
     file_values = dotenv_values(env_file) if Path(env_file).is_file() else {}
 
@@ -117,6 +130,7 @@ def load_settings(env_file: str | Path = DEFAULT_ENV_FILE) -> Settings:
         database_url=get("DATABASE_URL", "sqlite:///./riskrank.db"),
         dashboard_host=get("DASHBOARD_HOST", "127.0.0.1"),
         dashboard_port=_parse_port(get("DASHBOARD_PORT", "8000")),
+        scan_allowlist=_parse_allowlist(get("SCAN_ALLOWLIST")),
     )
 
     _validate_url("ZAP_API_URL", settings.zap_api_url, ("http", "https"))
