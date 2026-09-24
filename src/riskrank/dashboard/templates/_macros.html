@@ -5,3 +5,44 @@
 {% macro tier_badge(tier) -%}
 <span class="badge tier-{{ tier | lower }}"><span class="badge-dot" aria-hidden="true"></span>{{ tier }}</span>
 {%- endmacro %}
+
+
+{#- "New scan" watcher (R043): polls the JSON API (GET /scans?limit=1) while the
+    tab is visible and shows a refresh banner when a newer scan appears.
+    Values are compared as numbers and the banner text is fixed, so nothing
+    from the API is ever written into the page as HTML. -#}
+{% macro new_scan_watcher(watch_url, latest_id, interval_seconds=30) -%}
+<div id="new-scan-banner" class="banner" role="status" hidden
+     data-watch-url="{{ watch_url }}" data-latest-id="{{ latest_id }}"
+     data-interval="{{ interval_seconds }}">
+  <span>A new scan has finished.</span>
+  <button type="button" onclick="window.location.reload()">Refresh</button>
+</div>
+<script>
+(function () {
+  const banner = document.getElementById("new-scan-banner");
+  const url = banner.dataset.watchUrl;
+  const latest = Number(banner.dataset.latestId);
+  const interval = Number(banner.dataset.interval) * 1000;
+  let timer = null;
+
+  async function check() {
+    if (document.visibilityState !== "visible") return;
+    try {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!response.ok) return;
+      const body = await response.json();
+      const newest = body.items && body.items.length ? Number(body.items[0].id) : 0;
+      if (newest > latest) {
+        banner.hidden = false;
+        clearInterval(timer);
+      }
+    } catch (error) {
+      /* Dashboard server restarting or offline: try again next time. */
+    }
+  }
+  timer = setInterval(check, interval);
+  document.addEventListener("visibilitychange", check);
+})();
+</script>
+{%- endmacro %}

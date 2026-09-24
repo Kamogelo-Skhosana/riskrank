@@ -11,7 +11,7 @@
   · {{ scan.finding_count }} finding{{ "" if scan.finding_count == 1 else "s" }}
   · {{ scan.triaged_count }} triaged
   · riskrank v{{ scan.riskrank_version }}
-  · <a href="/scans/{{ scan.id }}">JSON</a>
+  · <a class="api-link" href="{{ url_for('get_scan', scan_id=scan.id).path }}">JSON</a>
 </p>
 
 <section aria-labelledby="summary-heading" class="card">

@@ -136,6 +136,11 @@
     .chips a { color: var(--text-secondary); background: var(--surface-1); }
     .chips strong { background: var(--text-primary); color: var(--page); border-color: var(--text-primary); }
 
+    .banner { display: flex; align-items: center; gap: .75rem; margin: 0 0 1rem; padding: .6rem 1rem;
+              background: var(--surface-1); border: 1px solid var(--series-1); border-radius: 8px; }
+    .banner[hidden] { display: none; }
+    .api-link { font-size: .8125rem; }
+
     /* Tier badges: dot carries the colour, the word carries the meaning. */
     .badge { display: inline-flex; align-items: center; gap: .35rem; font-weight: 600; white-space: nowrap; font-size: .875rem; }
     .badge-dot { width: .6rem; height: .6rem; border-radius: 50%; background: var(--tier-low); flex: none; }

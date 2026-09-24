@@ -1,8 +1,10 @@
-"""Tests for the dashboard API (in-process; no server or network).
+"""Tests for the dashboard: JSON API and HTML pages (in-process; no server or network).
 
-Tickets: R035-R038
+Tickets: R035-R043 (API, pages, theme and API wiring)
 """
 
+import html as html_lib
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -847,7 +849,7 @@ def test_trend_page_escapes_target_everywhere(client, save):
     save(evil, [detailed("f1", "A", "/", 5, 5)])
     html = client.get("/trend").text
     assert "<script>alert(1)</script>" not in html
-    assert html.count("</script>") == 1  # only the page's own script tag
+    assert html.count("</script>") == 2  # only the page's own scripts (watcher + chart)
 
 
 def test_trend_page_tooltip_data_is_json(client, save):
@@ -894,3 +896,106 @@ def test_tier_badges_pair_colour_with_the_tier_name(client, juice_scan):
 def test_tables_scroll_instead_of_overflowing_on_small_screens(client, save):
     save("t", [])
     assert '<div class="table-wrap">' in client.get("/").text
+
+
+# --- R043: frontend wired to the JSON API -----------------------------------------------
+
+
+def banner_attrs(page_html):
+    match = re.search(
+        r'id="new-scan-banner"[^>]*data-watch-url="([^"]*)" data-latest-id="(\d+)"', page_html
+    )
+    assert match, "new-scan banner missing"
+    return html_lib.unescape(match.group(1)), int(match.group(2))
+
+
+def test_scan_list_watches_the_api_for_new_scans(client, save):
+    save("http://a", [], day=0)
+    newest = save("http://b", [], day=1)
+    page = client.get("/").text
+    watch_url, latest = banner_attrs(page)
+    assert watch_url == "/scans?limit=1"
+    assert latest == newest
+    assert '<div id="new-scan-banner" class="banner" role="status" hidden' in page
+
+    # The URL the page polls really is the JSON API, and answers with the newest scan.
+    assert client.get(watch_url).json()["items"][0]["id"] == newest
+
+
+def test_watcher_keeps_the_target_filter(client, save):
+    a = save("http://a", [], day=5)
+    save("http://b", [], day=9)
+    watch_url, latest = banner_attrs(client.get("/", params={"target": "http://a"}).text)
+    assert watch_url == "/scans?target=http%3A%2F%2Fa&limit=1"
+    assert latest == a
+
+
+def test_watcher_on_empty_dashboard_starts_from_zero(client):
+    watch_url, latest = banner_attrs(client.get("/").text)
+    assert (watch_url, latest) == ("/scans?limit=1", 0)
+
+
+def test_watcher_detects_a_new_scan_via_the_api(client, save):
+    """Simulates the browser: remember the latest id, a scan finishes, poll again."""
+    save("t", [], day=0)
+    watch_url, latest = banner_attrs(client.get("/").text)
+    assert client.get(watch_url).json()["items"][0]["id"] == latest  # nothing new yet
+    save("t", [], day=1)
+    assert client.get(watch_url).json()["items"][0]["id"] > latest  # banner would show
+
+
+def test_trend_page_watches_its_target(client, save):
+    s1 = save("http://a", [detailed("f1", "A", "/", 5, 5)], day=0)
+    save("http://b", [], day=-1)
+    watch_url, latest = banner_attrs(client.get("/trend").text)
+    assert watch_url == "/scans?target=http%3A%2F%2Fa&limit=1"
+    assert latest == s1
+
+
+def test_watcher_script_never_writes_api_data_into_the_page(client):
+    page = client.get("/").text
+    script = page.split('id="new-scan-banner"', 1)[1].split("</script>", 1)[0]
+    assert "innerHTML" not in script and "insertAdjacentHTML" not in script
+    assert 'document.visibilityState !== "visible"' in script  # no polling in background tabs
+
+
+@pytest.mark.parametrize(
+    ("page", "api"),
+    [
+        ("/", "/scans"),
+        ("/?target=http%3A%2F%2Fa", "/scans?target=http%3A%2F%2Fa"),
+        ("/trend", "/scans/trend?target=http%3A%2F%2Fa"),
+    ],
+)
+def test_pages_link_to_their_json(client, save, page, api):
+    save("http://a", [detailed("f1", "A", "/", 5, 5)])
+    html_text = client.get(page).text
+    assert f'<a class="api-link" href="{html_lib.escape(api)}">JSON</a>' in html_text
+    assert client.get(api).status_code == 200
+
+
+def test_detail_page_links_to_its_json(client, juice_scan):
+    html_text = client.get(f"/scan/{juice_scan}").text
+    assert f'<a class="api-link" href="/scans/{juice_scan}">JSON</a>' in html_text
+
+
+def test_pages_and_api_agree(client, juice_scan, save):
+    """The pages are rendered from the same data the JSON API returns."""
+    save("http://localhost:3000", [detailed("f1", "XSS", "/", 6, 6)], day=1)
+
+    api_scans = client.get("/scans").json()["items"]
+    page = client.get("/").text
+    positions = [page.index(f'href="/scan/{s["id"]}"') for s in api_scans]
+    assert positions == sorted(positions)  # same order
+
+    detail = client.get(f"/scans/{juice_scan}").json()
+    detail_page = client.get(f"/scan/{juice_scan}").text
+    for issue in detail["issues"]:
+        if issue["priority_tier"]:
+            assert f"<span>{issue['rank']}.</span>" in detail_page
+            assert f"{issue['priority_score']}/100" in detail_page
+
+    trend = client.get("/scans/trend", params={"target": "http://localhost:3000"}).json()
+    trend_page = client.get("/trend").text
+    for point in trend["points"]:
+        assert f'<td class="num">{point["risk_score"]}</td>' in trend_page

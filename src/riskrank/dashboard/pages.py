@@ -41,6 +41,13 @@ TEMPLATES.env.globals["riskrank_version"] = __version__
 router = APIRouter(include_in_schema=False)  # pages aren't part of the JSON API docs
 
 
+def _api_url(request: Request, route: str, **params) -> str:
+    """Path of a JSON API route (see api.py) with query parameters."""
+    query = urlencode({k: v for k, v in params.items() if v not in (None, "")})
+    path = request.app.url_path_for(route)
+    return f"{path}?{query}" if query else str(path)
+
+
 def _page_url(request: Request, target: str | None, page: int) -> str:
     """URL of another page of the scan list, keeping the target filter."""
     params = {}
@@ -62,6 +69,7 @@ def scan_list_page(
         scans = list_scan_summaries(
             session, target=target or None, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE
         )
+        newest = list_scan_summaries(session, target=target or None, limit=1).items
     page_count = max(1, -(-scans.total // PAGE_SIZE))  # ceiling division
 
     return TEMPLATES.TemplateResponse(
@@ -70,6 +78,9 @@ def scan_list_page(
         {
             "scans": scans,
             "target": target or "",
+            "latest_scan_id": newest[0].id if newest else 0,
+            "watch_url": _api_url(request, "list_scans", target=target, limit=1),
+            "api_url": _api_url(request, "list_scans", target=target),
             "page": page,
             "page_count": page_count,
             "prev_url": _page_url(request, target=target, page=page - 1) if page > 1 else None,
@@ -240,6 +251,9 @@ def trend_page(
             "selected": selected,
             "points": points,
             "latest": latest,
+            "latest_scan_id": latest.scan_id if latest else 0,
+            "watch_url": _api_url(request, "list_scans", target=selected, limit=1),
+            "api_url": _api_url(request, "get_trend", target=selected),
             "chart": build_trend_chart(points),
             "tooltip_data": [
                 {

@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% from "_macros.html" import tier_badge %}
+{% from "_macros.html" import new_scan_watcher, tier_badge %}
 {% set section = "scans" %}
 {% block title %}Scan history{% endblock %}
 {% block content %}
 <h1>Scan history</h1>
+{{ new_scan_watcher(watch_url, latest_scan_id) }}
 
 <form method="get" action="{{ url_for('scan_list_page').path }}" role="search" class="filters">
   <label for="target">Target</label>
@@ -13,7 +14,8 @@
 </form>
 
 {% if scans.items %}
-<p class="muted">{{ scans.total }} scan{{ "" if scans.total == 1 else "s" }}{% if target %} of <code>{{ target }}</code>{% endif %}, newest first.</p>
+<p class="muted">{{ scans.total }} scan{{ "" if scans.total == 1 else "s" }}{% if target %} of <code>{{ target }}</code>{% endif %}, newest first.
+  <a class="api-link" href="{{ api_url }}">JSON</a></p>
 <div class="table-wrap">
 <table>
   <thead>
